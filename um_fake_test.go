@@ -15,6 +15,12 @@ type fakeUMClient struct {
 	authenticateWithRefreshTokenFunc func(ctx context.Context, opts usermanagement.AuthenticateWithRefreshTokenOpts) (usermanagement.RefreshAuthenticationResponse, error)
 	listSessionsFunc                 func(ctx context.Context, userID string, opts usermanagement.ListSessionsOpts) (usermanagement.ListSessionsResponse, error)
 	revokeSessionFunc                func(ctx context.Context, opts usermanagement.RevokeSessionOpts) error
+	getUserFunc                      func(ctx context.Context, opts usermanagement.GetUserOpts) (usermanagement.User, error)
+	listUsersFunc                    func(ctx context.Context, opts usermanagement.ListUsersOpts) (usermanagement.ListUsersResponse, error)
+	updateUserFunc                   func(ctx context.Context, opts usermanagement.UpdateUserOpts) (usermanagement.User, error)
+	deleteUserFunc                   func(ctx context.Context, opts usermanagement.DeleteUserOpts) error
+	listOrganizationMembershipsFunc  func(ctx context.Context, opts usermanagement.ListOrganizationMembershipsOpts) (usermanagement.ListOrganizationMembershipsResponse, error)
+	getOrganizationMembershipFunc    func(ctx context.Context, opts usermanagement.GetOrganizationMembershipOpts) (usermanagement.OrganizationMembership, error)
 }
 
 func (*fakeUMClient) privateUMClient() {}
@@ -59,4 +65,46 @@ func (f *fakeUMClient) RevokeSession(ctx context.Context, opts usermanagement.Re
 		return errors.New("not mocked")
 	}
 	return f.revokeSessionFunc(ctx, opts)
+}
+
+func (f *fakeUMClient) GetUser(ctx context.Context, opts usermanagement.GetUserOpts) (usermanagement.User, error) {
+	if f.getUserFunc == nil {
+		return usermanagement.User{}, errors.New("not mocked")
+	}
+	return f.getUserFunc(ctx, opts)
+}
+
+func (f *fakeUMClient) ListUsers(ctx context.Context, opts usermanagement.ListUsersOpts) (usermanagement.ListUsersResponse, error) {
+	if f.listUsersFunc == nil {
+		return usermanagement.ListUsersResponse{}, errors.New("not mocked")
+	}
+	return f.listUsersFunc(ctx, opts)
+}
+
+func (f *fakeUMClient) UpdateUser(ctx context.Context, opts usermanagement.UpdateUserOpts) (usermanagement.User, error) {
+	if f.updateUserFunc == nil {
+		return usermanagement.User{}, errors.New("not mocked")
+	}
+	return f.updateUserFunc(ctx, opts)
+}
+
+func (f *fakeUMClient) DeleteUser(ctx context.Context, opts usermanagement.DeleteUserOpts) error {
+	if f.deleteUserFunc == nil {
+		return errors.New("not mocked")
+	}
+	return f.deleteUserFunc(ctx, opts)
+}
+
+func (f *fakeUMClient) ListOrganizationMemberships(ctx context.Context, opts usermanagement.ListOrganizationMembershipsOpts) (usermanagement.ListOrganizationMembershipsResponse, error) {
+	if f.listOrganizationMembershipsFunc == nil {
+		return usermanagement.ListOrganizationMembershipsResponse{}, errors.New("not mocked")
+	}
+	return f.listOrganizationMembershipsFunc(ctx, opts)
+}
+
+func (f *fakeUMClient) GetOrganizationMembership(ctx context.Context, opts usermanagement.GetOrganizationMembershipOpts) (usermanagement.OrganizationMembership, error) {
+	if f.getOrganizationMembershipFunc == nil {
+		return usermanagement.OrganizationMembership{}, errors.New("not mocked")
+	}
+	return f.getOrganizationMembershipFunc(ctx, opts)
 }

@@ -21,11 +21,33 @@ type umClient interface {
 	AuthenticateWithRefreshToken(ctx context.Context, opts usermanagement.AuthenticateWithRefreshTokenOpts) (usermanagement.RefreshAuthenticationResponse, error)
 	ListSessions(ctx context.Context, userID string, opts usermanagement.ListSessionsOpts) (usermanagement.ListSessionsResponse, error)
 	RevokeSession(ctx context.Context, opts usermanagement.RevokeSessionOpts) error
+	GetUser(ctx context.Context, opts usermanagement.GetUserOpts) (usermanagement.User, error)
+	ListUsers(ctx context.Context, opts usermanagement.ListUsersOpts) (usermanagement.ListUsersResponse, error)
+	UpdateUser(ctx context.Context, opts usermanagement.UpdateUserOpts) (usermanagement.User, error)
+	DeleteUser(ctx context.Context, opts usermanagement.DeleteUserOpts) error
+	ListOrganizationMemberships(ctx context.Context, opts usermanagement.ListOrganizationMembershipsOpts) (usermanagement.ListOrganizationMembershipsResponse, error)
+	GetOrganizationMembership(ctx context.Context, opts usermanagement.GetOrganizationMembershipOpts) (usermanagement.OrganizationMembership, error)
 }
-type ssoClient interface{ privateSSOClient() }
-type directorySyncClient interface{ privateDirectorySyncClient() }
-type auditLogsClient interface{ privateAuditLogsClient() }
-type orgsClient interface{ privateOrgsClient() }
+type ssoClient interface {
+	privateSSOClient()
+	ListConnections(ctx context.Context, opts sso.ListConnectionsOpts) (sso.ListConnectionsResponse, error)
+}
+type directorySyncClient interface {
+	privateDirectorySyncClient()
+	ListDirectories(ctx context.Context, opts directorysync.ListDirectoriesOpts) (directorysync.ListDirectoriesResponse, error)
+	ListUsers(ctx context.Context, opts directorysync.ListUsersOpts) (directorysync.ListUsersResponse, error)
+	ListGroups(ctx context.Context, opts directorysync.ListGroupsOpts) (directorysync.ListGroupsResponse, error)
+}
+type auditLogsClient interface {
+	privateAuditLogsClient()
+	CreateEvent(ctx context.Context, e auditlogs.CreateEventOpts) error
+}
+type orgsClient interface {
+	privateOrgsClient()
+	GetOrganization(ctx context.Context, opts organizations.GetOrganizationOpts) (organizations.Organization, error)
+	ListOrganizations(ctx context.Context, opts organizations.ListOrganizationsOpts) (organizations.ListOrganizationsResponse, error)
+	ListOrganizationRoles(ctx context.Context, opts organizations.ListOrganizationRolesOpts) (organizations.ListOrganizationRolesResponse, error)
+}
 type webhookVerifier interface{ privateWebhookVerifier() }
 
 type realUMClient struct{ client *usermanagement.Client }
@@ -56,21 +78,77 @@ func (c *realUMClient) RevokeSession(ctx context.Context, opts usermanagement.Re
 	return c.client.RevokeSession(ctx, opts)
 }
 
+func (c *realUMClient) GetUser(ctx context.Context, opts usermanagement.GetUserOpts) (usermanagement.User, error) {
+	return c.client.GetUser(ctx, opts)
+}
+
+func (c *realUMClient) ListUsers(ctx context.Context, opts usermanagement.ListUsersOpts) (usermanagement.ListUsersResponse, error) {
+	return c.client.ListUsers(ctx, opts)
+}
+
+func (c *realUMClient) UpdateUser(ctx context.Context, opts usermanagement.UpdateUserOpts) (usermanagement.User, error) {
+	return c.client.UpdateUser(ctx, opts)
+}
+
+func (c *realUMClient) DeleteUser(ctx context.Context, opts usermanagement.DeleteUserOpts) error {
+	return c.client.DeleteUser(ctx, opts)
+}
+
+func (c *realUMClient) ListOrganizationMemberships(ctx context.Context, opts usermanagement.ListOrganizationMembershipsOpts) (usermanagement.ListOrganizationMembershipsResponse, error) {
+	return c.client.ListOrganizationMemberships(ctx, opts)
+}
+
+func (c *realUMClient) GetOrganizationMembership(ctx context.Context, opts usermanagement.GetOrganizationMembershipOpts) (usermanagement.OrganizationMembership, error) {
+	return c.client.GetOrganizationMembership(ctx, opts)
+}
+
 type realSSOClient struct{ client *sso.Client }
 
 func (*realSSOClient) privateSSOClient() {}
+
+func (c *realSSOClient) ListConnections(ctx context.Context, opts sso.ListConnectionsOpts) (sso.ListConnectionsResponse, error) {
+	return c.client.ListConnections(ctx, opts)
+}
 
 type realDirectorySyncClient struct{ client *directorysync.Client }
 
 func (*realDirectorySyncClient) privateDirectorySyncClient() {}
 
+func (c *realDirectorySyncClient) ListDirectories(ctx context.Context, opts directorysync.ListDirectoriesOpts) (directorysync.ListDirectoriesResponse, error) {
+	return c.client.ListDirectories(ctx, opts)
+}
+
+func (c *realDirectorySyncClient) ListUsers(ctx context.Context, opts directorysync.ListUsersOpts) (directorysync.ListUsersResponse, error) {
+	return c.client.ListUsers(ctx, opts)
+}
+
+func (c *realDirectorySyncClient) ListGroups(ctx context.Context, opts directorysync.ListGroupsOpts) (directorysync.ListGroupsResponse, error) {
+	return c.client.ListGroups(ctx, opts)
+}
+
 type realAuditLogsClient struct{ client *auditlogs.Client }
 
 func (*realAuditLogsClient) privateAuditLogsClient() {}
 
+func (c *realAuditLogsClient) CreateEvent(ctx context.Context, e auditlogs.CreateEventOpts) error {
+	return c.client.CreateEvent(ctx, e)
+}
+
 type realOrgsClient struct{ client *organizations.Client }
 
 func (*realOrgsClient) privateOrgsClient() {}
+
+func (c *realOrgsClient) GetOrganization(ctx context.Context, opts organizations.GetOrganizationOpts) (organizations.Organization, error) {
+	return c.client.GetOrganization(ctx, opts)
+}
+
+func (c *realOrgsClient) ListOrganizations(ctx context.Context, opts organizations.ListOrganizationsOpts) (organizations.ListOrganizationsResponse, error) {
+	return c.client.ListOrganizations(ctx, opts)
+}
+
+func (c *realOrgsClient) ListOrganizationRoles(ctx context.Context, opts organizations.ListOrganizationRolesOpts) (organizations.ListOrganizationRolesResponse, error) {
+	return c.client.ListOrganizationRoles(ctx, opts)
+}
 
 type realWebhookVerifier struct{ client *webhooks.Client }
 
