@@ -37,6 +37,7 @@ type Client struct {
 }
 
 var _ interface{ Config() Config } = (*Client)(nil)
+var _ Sessions = (*Client)(nil)
 
 // New creates a validated client and applies safe defaults.
 func New(cfg Config) (*Client, error) {
@@ -154,11 +155,4 @@ func (c *Client) Config() Config {
 	cfg.CookieSecretFallbacks = nil
 	cfg.WebhookSecret = "***"
 	return cfg
-}
-
-type refreshGroup struct{}
-
-type sessionListCacheEntry struct {
-	fetchedAt time.Time
-	sessions  map[string]*SessionInfo
 }

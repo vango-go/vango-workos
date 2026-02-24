@@ -1,6 +1,8 @@
 package workos
 
 import (
+	"context"
+
 	"github.com/workos/workos-go/v6/pkg/auditlogs"
 	"github.com/workos/workos-go/v6/pkg/directorysync"
 	"github.com/workos/workos-go/v6/pkg/organizations"
@@ -10,7 +12,12 @@ import (
 )
 
 // Private seams for deterministic tests.
-type umClient interface{ privateUMClient() }
+type umClient interface {
+	privateUMClient()
+	AuthenticateWithRefreshToken(ctx context.Context, opts usermanagement.AuthenticateWithRefreshTokenOpts) (usermanagement.RefreshAuthenticationResponse, error)
+	ListSessions(ctx context.Context, userID string, opts usermanagement.ListSessionsOpts) (usermanagement.ListSessionsResponse, error)
+	RevokeSession(ctx context.Context, opts usermanagement.RevokeSessionOpts) error
+}
 type ssoClient interface{ privateSSOClient() }
 type directorySyncClient interface{ privateDirectorySyncClient() }
 type auditLogsClient interface{ privateAuditLogsClient() }
@@ -20,6 +27,18 @@ type webhookVerifier interface{ privateWebhookVerifier() }
 type realUMClient struct{ client *usermanagement.Client }
 
 func (*realUMClient) privateUMClient() {}
+
+func (c *realUMClient) AuthenticateWithRefreshToken(ctx context.Context, opts usermanagement.AuthenticateWithRefreshTokenOpts) (usermanagement.RefreshAuthenticationResponse, error) {
+	return c.client.AuthenticateWithRefreshToken(ctx, opts)
+}
+
+func (c *realUMClient) ListSessions(ctx context.Context, userID string, opts usermanagement.ListSessionsOpts) (usermanagement.ListSessionsResponse, error) {
+	return c.client.ListSessions(ctx, userID, opts)
+}
+
+func (c *realUMClient) RevokeSession(ctx context.Context, opts usermanagement.RevokeSessionOpts) error {
+	return c.client.RevokeSession(ctx, opts)
+}
 
 type realSSOClient struct{ client *sso.Client }
 
