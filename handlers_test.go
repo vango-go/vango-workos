@@ -83,6 +83,19 @@ func TestSignInHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("method not allowed", func(t *testing.T) {
+		client := newHandlerClient(t, &fakeUMClient{})
+
+		req := httptest.NewRequest(http.MethodPost, "http://example.test/auth/signin", nil)
+		w := httptest.NewRecorder()
+		client.SignInHandler(w, req)
+		resp := w.Result()
+
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
+		}
+	})
+
 	t.Run("upstream failure", func(t *testing.T) {
 		client := newHandlerClient(t, &fakeUMClient{
 			getAuthorizationURLFunc: func(usermanagement.GetAuthorizationURLOpts) (*url.URL, error) {
@@ -136,6 +149,18 @@ func TestSignUpHandler(t *testing.T) {
 
 func TestCallbackHandler_ValidationAndSanitization(t *testing.T) {
 	client := newHandlerClient(t, &fakeUMClient{})
+
+	t.Run("method not allowed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "http://example.test/auth/callback?code=abc&state=s1", nil)
+		req.AddCookie(&http.Cookie{Name: stateCookieName, Value: "s1"})
+		w := httptest.NewRecorder()
+
+		client.CallbackHandler(w, req)
+		resp := w.Result()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
+		}
+	})
 
 	t.Run("missing code", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "http://example.test/auth/callback?state=s1", nil)
@@ -429,6 +454,15 @@ func TestSignedOutHandlers(t *testing.T) {
 		body := w.Body.String()
 		if !strings.Contains(body, "BroadcastChannel") || !strings.Contains(body, "__vango_session_id") {
 			t.Fatalf("script body missing expected behavior snippets")
+		}
+	})
+
+	t.Run("signed out script method gated", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "http://example.test/auth/signed-out.js", nil)
+		w := httptest.NewRecorder()
+		client.SignedOutScriptHandler(w, req)
+		if w.Result().StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusMethodNotAllowed)
 		}
 	})
 }

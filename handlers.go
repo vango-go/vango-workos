@@ -21,6 +21,11 @@ func generateState() string {
 }
 
 func (c *Client) SignInHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	state := generateState()
 	if state == "" {
 		http.Error(w, "Failed to generate sign-in URL", http.StatusInternalServerError)
@@ -43,6 +48,11 @@ func (c *Client) SignInHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Client) SignUpHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	state := generateState()
 	if state == "" {
 		http.Error(w, "Failed to generate sign-up URL", http.StatusInternalServerError)
@@ -66,6 +76,11 @@ func (c *Client) SignUpHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	code := r.URL.Query().Get("code")
 	state := r.URL.Query().Get("state")
 	errParam := r.URL.Query().Get("error")
@@ -187,7 +202,7 @@ func (c *Client) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Client) SignedOutHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -218,7 +233,12 @@ func signedOutHTML(returnTo string) string {
 </html>`, rt)
 }
 
-func (c *Client) SignedOutScriptHandler(w http.ResponseWriter, _ *http.Request) {
+func (c *Client) SignedOutScriptHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

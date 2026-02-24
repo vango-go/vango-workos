@@ -2,7 +2,7 @@
 
 `vango-workos` is the native WorkOS integration for Vango applications.
 
-This repository currently includes the PR A-F foundation:
+This repository currently includes the PR A-G foundation:
 - public interfaces and normalized domain types
 - strict config validation and safe defaults
 - secret-safe error wrapper
@@ -11,6 +11,8 @@ This repository currently includes the PR A-F foundation:
 - refresh-token single-flight and session validation/revocation primitives
 - AuthKit HTTP handlers (signin/signup/callback/logout/signed-out)
 - net/http boundary middleware for cookie validation, refresh, and identity projection
+- Vango session bridge hooks (`OnSessionStart`/`OnSessionResume`) with strict resume revalidation
+- periodic AuthCheck revalidation config and identity helper accessors
 
 ## Security posture
 
@@ -20,4 +22,4 @@ This repository currently includes the PR A-F foundation:
 
 ## Status
 
-This package is under active phased implementation. The current scope does not yet include session bridge wiring, webhook routing, or most WorkOS read/API method implementations.
+This package is under active phased implementation. The current scope does not yet include webhook routing, admin portal helpers, test kit utilities, or most WorkOS read/API method implementations (PR H+).
