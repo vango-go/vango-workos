@@ -2,6 +2,7 @@ package workos
 
 import (
 	"context"
+	"net/url"
 
 	"github.com/workos/workos-go/v6/pkg/auditlogs"
 	"github.com/workos/workos-go/v6/pkg/directorysync"
@@ -14,6 +15,9 @@ import (
 // Private seams for deterministic tests.
 type umClient interface {
 	privateUMClient()
+	GetAuthorizationURL(opts usermanagement.GetAuthorizationURLOpts) (*url.URL, error)
+	AuthenticateWithCode(ctx context.Context, opts usermanagement.AuthenticateWithCodeOpts) (usermanagement.AuthenticateResponse, error)
+	GetLogoutURL(opts usermanagement.GetLogoutURLOpts) (*url.URL, error)
 	AuthenticateWithRefreshToken(ctx context.Context, opts usermanagement.AuthenticateWithRefreshTokenOpts) (usermanagement.RefreshAuthenticationResponse, error)
 	ListSessions(ctx context.Context, userID string, opts usermanagement.ListSessionsOpts) (usermanagement.ListSessionsResponse, error)
 	RevokeSession(ctx context.Context, opts usermanagement.RevokeSessionOpts) error
@@ -27,6 +31,18 @@ type webhookVerifier interface{ privateWebhookVerifier() }
 type realUMClient struct{ client *usermanagement.Client }
 
 func (*realUMClient) privateUMClient() {}
+
+func (c *realUMClient) GetAuthorizationURL(opts usermanagement.GetAuthorizationURLOpts) (*url.URL, error) {
+	return c.client.GetAuthorizationURL(opts)
+}
+
+func (c *realUMClient) AuthenticateWithCode(ctx context.Context, opts usermanagement.AuthenticateWithCodeOpts) (usermanagement.AuthenticateResponse, error) {
+	return c.client.AuthenticateWithCode(ctx, opts)
+}
+
+func (c *realUMClient) GetLogoutURL(opts usermanagement.GetLogoutURLOpts) (*url.URL, error) {
+	return c.client.GetLogoutURL(opts)
+}
 
 func (c *realUMClient) AuthenticateWithRefreshToken(ctx context.Context, opts usermanagement.AuthenticateWithRefreshTokenOpts) (usermanagement.RefreshAuthenticationResponse, error) {
 	return c.client.AuthenticateWithRefreshToken(ctx, opts)
