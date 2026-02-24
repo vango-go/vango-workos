@@ -156,11 +156,6 @@ func (c *Client) Config() Config {
 	return cfg
 }
 
-type jwksCache struct {
-	fetchedAt time.Time
-	keys      map[string]any
-}
-
 type refreshGroup struct{}
 
 type sessionListCacheEntry struct {
