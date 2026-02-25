@@ -276,11 +276,16 @@ type ListDirectoryGroupsOpts struct {
 }
 
 type ListRolesOpts struct {
+	// OrganizationID scopes role listing to an organization.
+	// Empty means best-effort environment role aggregation across orgs.
 	OrganizationID string
-	Limit          int
-	Before         string
-	After          string
-	Order          string
+	// Limit is applied client-side after roles are fetched.
+	Limit int
+	// Before/After/Order are currently ignored for role listing due WorkOS SDK
+	// constraints on ListOrganizationRolesOpts.
+	Before string
+	After  string
+	Order  string
 }
 
 // WebhookEvent is a normalized webhook event from WorkOS.
@@ -300,9 +305,10 @@ type WebhookSubscription struct {
 type AdminPortalIntent string
 
 const (
-	AdminPortalSSO         AdminPortalIntent = "sso"
-	AdminPortalDSync       AdminPortalIntent = "dsync"
-	AdminPortalAuditLogs   AdminPortalIntent = "audit_logs"
-	AdminPortalLogStreams  AdminPortalIntent = "log_streams"
-	AdminPortalCertRenewal AdminPortalIntent = "certificate_renewal"
+	AdminPortalSSO                AdminPortalIntent = "sso"
+	AdminPortalDSync              AdminPortalIntent = "dsync"
+	AdminPortalAuditLogs          AdminPortalIntent = "audit_logs"
+	AdminPortalLogStreams         AdminPortalIntent = "log_streams"
+	AdminPortalCertRenewal        AdminPortalIntent = "certificate_renewal"
+	AdminPortalDomainVerification AdminPortalIntent = "domain_verification"
 )

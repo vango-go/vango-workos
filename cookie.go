@@ -43,13 +43,20 @@ func sameSiteFromConfig(v string) http.SameSite {
 	}
 }
 
+func effectiveCookieSecure(cfg Config) bool {
+	if cfg.CookieSecure {
+		return true
+	}
+	return sameSiteFromConfig(cfg.CookieSameSite) == http.SameSiteNoneMode
+}
+
 func setStateCookie(w http.ResponseWriter, state string, cfg Config) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     stateCookieName,
 		Value:    state,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   cfg.CookieSecure,
+		Secure:   effectiveCookieSecure(cfg),
 		SameSite: sameSiteFromConfig(cfg.CookieSameSite),
 		MaxAge:   int(stateCookieMaxAge.Seconds()),
 	})
@@ -72,7 +79,7 @@ func clearStateCookie(w http.ResponseWriter, cfg Config) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   cfg.CookieSecure,
+		Secure:   effectiveCookieSecure(cfg),
 		SameSite: sameSiteFromConfig(cfg.CookieSameSite),
 		MaxAge:   -1,
 	})
@@ -155,6 +162,12 @@ func openCookieSession(value string, secret string, aad string) (*cookieSession,
 	if err := json.Unmarshal(plain, &sess); err != nil {
 		return nil, &SafeError{msg: "workos: cookie decode failed", cause: err}
 	}
+	if sess.V != 0 && sess.V != 1 {
+		return nil, errors.New("workos: invalid cookie payload")
+	}
+	if sess.V == 0 {
+		sess.V = 1
+	}
 	return &sess, nil
 }
 
@@ -187,7 +200,7 @@ func setSessionCookie(w http.ResponseWriter, sess *cookieSession, cfg Config) er
 		Value:    val,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   cfg.CookieSecure,
+		Secure:   effectiveCookieSecure(cfg),
 		SameSite: sameSiteFromConfig(cfg.CookieSameSite),
 		MaxAge:   int(cfg.CookieMaxAge.Seconds()),
 	})
@@ -230,7 +243,7 @@ func clearSessionCookie(w http.ResponseWriter, cfg Config) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   cfg.CookieSecure,
+		Secure:   effectiveCookieSecure(cfg),
 		SameSite: sameSiteFromConfig(cfg.CookieSameSite),
 		MaxAge:   -1,
 	})

@@ -11,7 +11,47 @@ import (
 
 type sessionListCacheEntry struct {
 	fetchedAt time.Time
+	lastUsed  time.Time
 	sessions  map[string]*SessionInfo
+}
+
+func (c *Client) pruneSessionsCacheLocked(now time.Time) {
+	if c.sessionsCache == nil {
+		return
+	}
+
+	ttl := c.cfg.SessionListCacheDuration
+	if ttl > 0 {
+		for userID, ent := range c.sessionsCache {
+			if ent.sessions == nil || now.Sub(ent.fetchedAt) >= ttl {
+				delete(c.sessionsCache, userID)
+			}
+		}
+	}
+
+	maxUsers := c.cfg.SessionListCacheMaxUsers
+	if maxUsers <= 0 || len(c.sessionsCache) <= maxUsers {
+		return
+	}
+
+	for len(c.sessionsCache) > maxUsers {
+		oldestKey := ""
+		oldestAt := time.Time{}
+		for userID, ent := range c.sessionsCache {
+			candidateAt := ent.lastUsed
+			if candidateAt.IsZero() {
+				candidateAt = ent.fetchedAt
+			}
+			if oldestKey == "" || candidateAt.Before(oldestAt) {
+				oldestKey = userID
+				oldestAt = candidateAt
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(c.sessionsCache, oldestKey)
+	}
 }
 
 func parseWorkOSTime(s string) (time.Time, error) {
@@ -31,11 +71,15 @@ func (c *Client) listSessionsForUser(ctx context.Context, userID string) (map[st
 
 	ttl := c.cfg.SessionListCacheDuration
 	if ttl > 0 {
+		now := time.Now()
 		c.sessionsMu.Lock()
 		if c.sessionsCache == nil {
 			c.sessionsCache = make(map[string]sessionListCacheEntry)
 		}
-		if ent, ok := c.sessionsCache[userID]; ok && time.Since(ent.fetchedAt) < ttl && ent.sessions != nil {
+		c.pruneSessionsCacheLocked(now)
+		if ent, ok := c.sessionsCache[userID]; ok && now.Sub(ent.fetchedAt) < ttl && ent.sessions != nil {
+			ent.lastUsed = now
+			c.sessionsCache[userID] = ent
 			sessions := ent.sessions
 			c.sessionsMu.Unlock()
 			return sessions, nil
@@ -75,10 +119,13 @@ func (c *Client) listSessionsForUser(ctx context.Context, userID string) (map[st
 		if c.sessionsCache == nil {
 			c.sessionsCache = make(map[string]sessionListCacheEntry)
 		}
+		now := time.Now()
 		c.sessionsCache[userID] = sessionListCacheEntry{
-			fetchedAt: time.Now(),
+			fetchedAt: now,
+			lastUsed:  now,
 			sessions:  sessions,
 		}
+		c.pruneSessionsCacheLocked(now)
 		c.sessionsMu.Unlock()
 	}
 

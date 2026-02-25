@@ -24,6 +24,7 @@ type Config struct {
 
 	JWKSCacheDuration time.Duration
 	JWKSURL           string
+	JWKSFetchTimeout  time.Duration
 	JWTIssuer         string
 	JWTAudience       string
 
@@ -32,6 +33,7 @@ type Config struct {
 	MaxStaleSession                  time.Duration
 	DisablePeriodicSessionValidation bool
 	SessionListCacheDuration         time.Duration
+	SessionListCacheMaxUsers         int
 	DisableRefreshInMiddleware       bool
 
 	EnableAuditLogs bool

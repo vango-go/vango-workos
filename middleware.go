@@ -33,29 +33,37 @@ func (c *Client) Middleware() func(http.Handler) http.Handler {
 
 			claims, err := c.VerifyAccessToken(r.Context(), accessToken)
 			if err != nil {
-				if c.cfg.DisableRefreshInMiddleware || refreshToken == "" {
-					clearSessionCookie(w, c.cfg)
+				switch {
+				case errors.Is(err, ErrJWKSUnavailable):
 					next.ServeHTTP(w, r)
 					return
-				}
-				if err.Error() != "workos: invalid access token" {
-					clearSessionCookie(w, c.cfg)
-					next.ServeHTTP(w, r)
-					return
-				}
+				case errors.Is(err, ErrAccessTokenExpired):
+					if c.cfg.DisableRefreshInMiddleware || refreshToken == "" {
+						clearSessionCookie(w, c.cfg)
+						next.ServeHTTP(w, r)
+						return
+					}
+					refreshed, err := c.RefreshTokens(r.Context(), refreshToken)
+					if err != nil {
+						clearSessionCookie(w, c.cfg)
+						next.ServeHTTP(w, r)
+						return
+					}
+					accessToken = refreshed.AccessToken
+					refreshToken = refreshed.RefreshToken
+					needCookieWrite = true
 
-				refreshed, err := c.RefreshTokens(r.Context(), refreshToken)
-				if err != nil {
-					clearSessionCookie(w, c.cfg)
-					next.ServeHTTP(w, r)
-					return
-				}
-				accessToken = refreshed.AccessToken
-				refreshToken = refreshed.RefreshToken
-				needCookieWrite = true
-
-				claims, err = c.VerifyAccessToken(r.Context(), accessToken)
-				if err != nil {
+					claims, err = c.VerifyAccessToken(r.Context(), accessToken)
+					if err != nil {
+						if errors.Is(err, ErrJWKSUnavailable) {
+							next.ServeHTTP(w, r)
+							return
+						}
+						clearSessionCookie(w, c.cfg)
+						next.ServeHTTP(w, r)
+						return
+					}
+				default:
 					clearSessionCookie(w, c.cfg)
 					next.ServeHTTP(w, r)
 					return

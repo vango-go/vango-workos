@@ -333,6 +333,51 @@ func TestMiddleware_InvalidIssuerDoesNotRefreshClears(t *testing.T) {
 	}
 }
 
+func TestMiddleware_JWKSUnavailableDoesNotRefreshOrClearCookie(t *testing.T) {
+	key := mustRSAKey(t)
+	token := signRS256Token(t, key, "kid-1", baseClaims())
+
+	var refreshCalls int32
+	client, ts := newMiddlewareClientWithJWKS(t, func(_ http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+	}, func(cfg *Config) {
+		cfg.JWKSFetchTimeout = 40 * time.Millisecond
+	})
+	defer ts.Close()
+
+	client.um = &fakeUMClient{
+		authenticateWithRefreshTokenFunc: func(_ context.Context, _ usermanagement.AuthenticateWithRefreshTokenOpts) (usermanagement.RefreshAuthenticationResponse, error) {
+			atomic.AddInt32(&refreshCalls, 1)
+			return usermanagement.RefreshAuthenticationResponse{}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/private", nil)
+	setCookieOnRequest(t, req, client.cfg, &cookieSession{
+		AccessToken:  token,
+		RefreshToken: "refresh_present",
+	})
+
+	var gotUser any
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = vango.UserFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+	h := client.Middleware()(next)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if gotUser != nil {
+		t.Fatalf("user = %#v, want nil", gotUser)
+	}
+	if got := atomic.LoadInt32(&refreshCalls); got != 0 {
+		t.Fatalf("refresh calls = %d, want 0", got)
+	}
+	if len(w.Result().Header.Values("Set-Cookie")) != 0 {
+		t.Fatalf("unexpected cookie mutation headers: %v", w.Result().Header.Values("Set-Cookie"))
+	}
+}
+
 func TestMiddleware_ExpiredRefreshDisabledClears(t *testing.T) {
 	key := mustRSAKey(t)
 	claims := baseClaims()

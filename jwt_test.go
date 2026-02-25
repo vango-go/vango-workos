@@ -126,6 +126,9 @@ func TestVerifyAccessToken_EmptyToken(t *testing.T) {
 	if err.Error() != "workos: access token required" {
 		t.Fatalf("error = %q", err.Error())
 	}
+	if !errors.Is(err, ErrAccessTokenInvalid) {
+		t.Fatal("expected ErrAccessTokenInvalid")
+	}
 }
 
 func TestVerifyAccessToken_InvalidIssuer(t *testing.T) {
@@ -146,6 +149,9 @@ func TestVerifyAccessToken_InvalidIssuer(t *testing.T) {
 	if err.Error() != "workos: invalid token issuer" {
 		t.Fatalf("error = %q", err.Error())
 	}
+	if !errors.Is(err, ErrAccessTokenInvalid) {
+		t.Fatal("expected ErrAccessTokenInvalid")
+	}
 }
 
 func TestVerifyAccessToken_InvalidAudience(t *testing.T) {
@@ -165,6 +171,9 @@ func TestVerifyAccessToken_InvalidAudience(t *testing.T) {
 	}
 	if err.Error() != "workos: invalid token audience" {
 		t.Fatalf("error = %q", err.Error())
+	}
+	if !errors.Is(err, ErrAccessTokenInvalid) {
+		t.Fatal("expected ErrAccessTokenInvalid")
 	}
 }
 
@@ -188,6 +197,9 @@ func TestVerifyAccessToken_MissingSubOrSID(t *testing.T) {
 		if err.Error() != "workos: invalid token claims" {
 			t.Fatalf("error = %q", err.Error())
 		}
+		if !errors.Is(err, ErrAccessTokenInvalid) {
+			t.Fatal("expected ErrAccessTokenInvalid")
+		}
 	})
 
 	t.Run("missing sid", func(t *testing.T) {
@@ -206,6 +218,9 @@ func TestVerifyAccessToken_MissingSubOrSID(t *testing.T) {
 		}
 		if err.Error() != "workos: invalid token claims" {
 			t.Fatalf("error = %q", err.Error())
+		}
+		if !errors.Is(err, ErrAccessTokenInvalid) {
+			t.Fatal("expected ErrAccessTokenInvalid")
 		}
 	})
 }
@@ -228,6 +243,9 @@ func TestVerifyAccessToken_ExpiredTokenOutsideLeeway(t *testing.T) {
 	if err.Error() != "workos: invalid access token" {
 		t.Fatalf("error = %q", err.Error())
 	}
+	if !errors.Is(err, ErrAccessTokenExpired) {
+		t.Fatal("expected ErrAccessTokenExpired")
+	}
 }
 
 func TestVerifyAccessToken_UnexpectedAlg(t *testing.T) {
@@ -246,6 +264,9 @@ func TestVerifyAccessToken_UnexpectedAlg(t *testing.T) {
 	}
 	if err.Error() != "workos: unexpected jwt alg" {
 		t.Fatalf("error = %q", err.Error())
+	}
+	if !errors.Is(err, ErrAccessTokenInvalid) {
+		t.Fatal("expected ErrAccessTokenInvalid")
 	}
 }
 
@@ -294,6 +315,9 @@ func TestVerifyAccessToken_UnknownKidAfterRefreshFails(t *testing.T) {
 	}
 	if err.Error() != "workos: unknown jwt kid" {
 		t.Fatalf("error = %q", err.Error())
+	}
+	if !errors.Is(err, ErrAccessTokenInvalid) {
+		t.Fatal("expected ErrAccessTokenInvalid")
 	}
 }
 

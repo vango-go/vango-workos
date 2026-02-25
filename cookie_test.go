@@ -188,3 +188,25 @@ func TestCookieErrorStringsDoNotLeakTokens(t *testing.T) {
 	}
 	assertNoSecretLeak(t, err.Error(), "secret_access_token_123", "secret_refresh_token_123")
 }
+
+func TestCookieSameSiteNoneForcesSecure(t *testing.T) {
+	cfg := testCookieConfig()
+	cfg.CookieSecure = false
+	cfg.CookieSameSite = "none"
+
+	rec := httptest.NewRecorder()
+	setStateCookie(rec, "state-123", cfg)
+	stateCookie := rec.Result().Cookies()[0]
+	if !stateCookie.Secure {
+		t.Fatal("state cookie should force Secure when SameSite=None")
+	}
+
+	rec = httptest.NewRecorder()
+	if err := setSessionCookie(rec, &cookieSession{AccessToken: "at", RefreshToken: "rt"}, cfg); err != nil {
+		t.Fatalf("setSessionCookie error = %v", err)
+	}
+	sessionCookie := rec.Result().Cookies()[0]
+	if !sessionCookie.Secure {
+		t.Fatal("session cookie should force Secure when SameSite=None")
+	}
+}

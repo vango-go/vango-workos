@@ -113,6 +113,9 @@ func TestGetJWKS_Non2xx(t *testing.T) {
 	if err.Error() != "workos: jwks fetch failed" {
 		t.Fatalf("error = %q, want %q", err.Error(), "workos: jwks fetch failed")
 	}
+	if !errors.Is(err, ErrJWKSUnavailable) {
+		t.Fatal("expected ErrJWKSUnavailable")
+	}
 }
 
 func TestGetJWKS_InvalidJSON(t *testing.T) {
@@ -132,6 +135,9 @@ func TestGetJWKS_InvalidJSON(t *testing.T) {
 	var safeErr *SafeError
 	if ok := errors.As(err, &safeErr); !ok {
 		t.Fatal("expected SafeError")
+	}
+	if !errors.Is(err, ErrJWKSUnavailable) {
+		t.Fatal("expected ErrJWKSUnavailable")
 	}
 }
 
@@ -163,5 +169,43 @@ func TestGetJWKS_IgnoresInvalidKeys(t *testing.T) {
 	}
 	if cache.keys["good-key"] == nil {
 		t.Fatal("expected good-key to be present")
+	}
+}
+
+func TestGetJWKS_RespectsConfiguredTimeout(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		time.Sleep(250 * time.Millisecond)
+	}))
+	defer ts.Close()
+
+	cfg := Config{
+		APIKey:            "sk_test_abcdefghijklmnopqrstuvwxyz123456",
+		ClientID:          "client_test_123456",
+		RedirectURI:       "https://app.example.com/auth/callback",
+		CookieSecret:      "0123456789abcdef0123456789abcdef",
+		BaseURL:           "https://app.example.com",
+		JWKSURL:           ts.URL,
+		JWKSCacheDuration: time.Hour,
+		JWKSFetchTimeout:  40 * time.Millisecond,
+		JWTAudience:       "client_test_audience",
+		JWTIssuer:         "https://api.workos.com",
+	}
+
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	start := time.Now()
+	_, err = client.getJWKS(context.Background(), true)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	elapsed := time.Since(start)
+	if elapsed > 220*time.Millisecond {
+		t.Fatalf("getJWKS took too long: %v", elapsed)
+	}
+	if !errors.Is(err, ErrJWKSUnavailable) {
+		t.Fatal("expected ErrJWKSUnavailable")
 	}
 }

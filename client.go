@@ -2,6 +2,7 @@ package workos
 
 import (
 	"errors"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -10,9 +11,9 @@ import (
 	"github.com/workos/workos-go/v6/pkg/auditlogs"
 	"github.com/workos/workos-go/v6/pkg/directorysync"
 	"github.com/workos/workos-go/v6/pkg/organizations"
+	"github.com/workos/workos-go/v6/pkg/portal"
 	"github.com/workos/workos-go/v6/pkg/sso"
 	"github.com/workos/workos-go/v6/pkg/usermanagement"
-	"github.com/workos/workos-go/v6/pkg/webhooks"
 )
 
 // Client is the concrete integration client.
@@ -24,6 +25,7 @@ type Client struct {
 	ds        directorySyncClient
 	al        auditLogsClient
 	orgs      orgsClient
+	portal    portalClient
 	wh        webhookVerifier
 
 	jwksMu      sync.RWMutex
@@ -34,6 +36,8 @@ type Client struct {
 
 	sessionsMu    sync.Mutex
 	sessionsCache map[string]sessionListCacheEntry
+
+	jwksHTTPClient *http.Client
 }
 
 var _ interface{ Config() Config } = (*Client)(nil)
@@ -75,8 +79,23 @@ func New(cfg Config) (*Client, error) {
 	if cfg.BaseURL == "" {
 		return nil, errors.New("workos: BaseURL is required")
 	}
-	if _, err := url.Parse(cfg.BaseURL); err != nil {
+	baseURL, err := url.Parse(cfg.BaseURL)
+	if err != nil {
 		return nil, errors.New("workos: BaseURL is invalid")
+	}
+	switch strings.ToLower(baseURL.Scheme) {
+	case "http", "https":
+	default:
+		return nil, errors.New("workos: BaseURL is invalid")
+	}
+	if baseURL.Host == "" {
+		return nil, errors.New("workos: BaseURL is invalid")
+	}
+	if cfg.JWKSFetchTimeout < 0 {
+		return nil, errors.New("workos: JWKSFetchTimeout cannot be negative")
+	}
+	if cfg.SessionListCacheMaxUsers < 0 {
+		return nil, errors.New("workos: SessionListCacheMaxUsers cannot be negative")
 	}
 
 	if cfg.CookieName == "" {
@@ -92,6 +111,9 @@ func New(cfg Config) (*Client, error) {
 		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(cfg.BaseURL)), "http://") {
 			cfg.CookieSecure = true
 		}
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.CookieSameSite), "none") {
+		cfg.CookieSecure = true
 	}
 	if cfg.JWKSCacheDuration == 0 {
 		cfg.JWKSCacheDuration = 1 * time.Hour
@@ -109,6 +131,9 @@ func New(cfg Config) (*Client, error) {
 	if cfg.JWTAudience == "" {
 		cfg.JWTAudience = cfg.ClientID
 	}
+	if cfg.JWKSFetchTimeout == 0 {
+		cfg.JWKSFetchTimeout = 5 * time.Second
+	}
 	if cfg.RevalidationInterval == 0 {
 		cfg.RevalidationInterval = 5 * time.Minute
 	}
@@ -120,6 +145,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	if cfg.SessionListCacheDuration == 0 {
 		cfg.SessionListCacheDuration = 30 * time.Second
+	}
+	if cfg.SessionListCacheMaxUsers == 0 {
+		cfg.SessionListCacheMaxUsers = 10000
 	}
 	if cfg.WebhookMaxBodyBytes == 0 {
 		cfg.WebhookMaxBodyBytes = 1 << 20
@@ -133,7 +161,7 @@ func New(cfg Config) (*Client, error) {
 	dsClient := &directorysync.Client{APIKey: cfg.APIKey}
 	alClient := &auditlogs.Client{APIKey: cfg.APIKey}
 	orgsClient := &organizations.Client{APIKey: cfg.APIKey}
-	whClient := &webhooks.Client{}
+	portalSDKClient := &portal.Client{APIKey: cfg.APIKey}
 
 	return &Client{
 		cfg: cfg,
@@ -143,7 +171,11 @@ func New(cfg Config) (*Client, error) {
 		ds:        &realDirectorySyncClient{client: dsClient},
 		al:        &realAuditLogsClient{client: alClient},
 		orgs:      &realOrgsClient{client: orgsClient},
-		wh:        &realWebhookVerifier{client: whClient},
+		portal:    &realPortalClient{client: portalSDKClient},
+		wh:        &realWebhookVerifier{},
+		jwksHTTPClient: &http.Client{
+			Timeout: cfg.JWKSFetchTimeout,
+		},
 	}, nil
 }
 

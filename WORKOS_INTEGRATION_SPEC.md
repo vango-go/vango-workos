@@ -518,13 +518,23 @@ type ListDirectoryGroupsOpts struct {
 }
 
 type ListRolesOpts struct {
-	OrganizationID string // empty = environment-level roles
+	// OrganizationID scopes listing to org roles.
+	// Empty means best-effort environment-role aggregation across organizations.
+	OrganizationID string
+	// Limit is applied client-side after roles are fetched.
 	Limit          int
+	// Before/After/Order are currently ignored for roles because
+	// WorkOS SDK v6 ListOrganizationRolesOpts only supports OrganizationID.
 	Before         string
 	After          string
 	Order          string
 }
 ```
+
+`ListRoles` behavior note:
+- Organization-scoped roles are fetched via WorkOS `ListOrganizationRoles`.
+- `Before`, `After`, and `Order` are accepted for API compatibility but ignored.
+- Empty `OrganizationID` uses a best-effort environment-role aggregation across organizations.
 
 ---
 
@@ -593,7 +603,12 @@ type Config struct {
 	CookieMaxAge time.Duration
 
 	// CookieSecure sets the Secure flag on cookies.
-	// Default: true. Set to false ONLY for local HTTP development.
+	//
+	// Defaulting behavior:
+	// - true when BaseURL uses https://
+	// - false when BaseURL uses http:// (local dev)
+	//
+	// Browser invariant (MUST): when CookieSameSite is "none", Secure is forced true.
 	CookieSecure bool
 
 	// CookieSameSite sets SameSite policy.
@@ -615,6 +630,11 @@ type Config struct {
 	// Default: usermanagement.GetJWKSURL(ClientID)
 	// Override only for testing.
 	JWKSURL string
+
+	// JWKSFetchTimeout bounds each JWKS HTTP fetch, even when caller context
+	// has no deadline.
+	// Default: 5 seconds.
+	JWKSFetchTimeout time.Duration
 
 	// JWTIssuer is the expected JWT issuer ("iss" claim).
 	// Default: "https://api.workos.com"
@@ -667,6 +687,11 @@ type Config struct {
 	//
 	// Default: 30 seconds.
 	SessionListCacheDuration time.Duration
+
+	// SessionListCacheMaxUsers bounds process-local per-user session cache size.
+	// When exceeded, least-recently-used users are evicted.
+	// Default: 10000.
+	SessionListCacheMaxUsers int
 
 	// DisableRefreshInMiddleware disables refresh-token exchange in the HTTP middleware.
 	//
@@ -726,6 +751,7 @@ type cookieSession struct {
 - `HttpOnly=true`, `Path=/`, `SameSite=Lax`
 - `Secure=true` in production; allow insecure only for local HTTP development
 - `MaxAge` derived from `CookieMaxAge` (default 7 days)
+- If `SameSite=None`, `Secure` MUST be forced true (browser requirement).
 
 ### 1.4.2 OAuth State Cookie (Normative)
 
@@ -740,6 +766,7 @@ The integration MUST implement state verification using a short-lived, HttpOnly 
 - `HttpOnly=true`, `Path=/`, `SameSite=Lax`
 - `Secure=true` in production; allow insecure only for local HTTP development
 - `MaxAge=10 minutes`
+- If `SameSite=None`, `Secure` MUST be forced true (browser requirement).
 
 **Verification rule (MUST):**
 - Callback must reject if query `state` is empty or does not exactly match the cookie value.
@@ -757,6 +784,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -849,6 +877,10 @@ var _ Auth = (*Client)(nil)
 		if cfg.BaseURL == "" {
 			return nil, errors.New("workos: BaseURL is required")
 		}
+		baseURL, err := url.Parse(cfg.BaseURL)
+		if err != nil || baseURL.Host == "" || (baseURL.Scheme != "http" && baseURL.Scheme != "https") {
+			return nil, errors.New("workos: BaseURL is invalid")
+		}
 
 	// Apply defaults
 	if cfg.CookieName == "" {
@@ -860,11 +892,22 @@ var _ Auth = (*Client)(nil)
 	if cfg.CookieSameSite == "" {
 		cfg.CookieSameSite = "lax"
 	}
+	if !cfg.CookieSecure {
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(cfg.BaseURL)), "http://") {
+			cfg.CookieSecure = true
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.CookieSameSite), "none") {
+		cfg.CookieSecure = true
+	}
 		if cfg.JWKSCacheDuration == 0 {
 			cfg.JWKSCacheDuration = 1 * time.Hour
 		}
 		if cfg.JWKSURL == "" {
 			cfg.JWKSURL = usermanagement.GetJWKSURL(cfg.ClientID)
+		}
+		if cfg.JWKSFetchTimeout == 0 {
+			cfg.JWKSFetchTimeout = 5 * time.Second
 		}
 		if cfg.JWTIssuer == "" {
 			cfg.JWTIssuer = "https://api.workos.com"
@@ -883,6 +926,9 @@ var _ Auth = (*Client)(nil)
 			}
 			if cfg.SessionListCacheDuration == 0 {
 				cfg.SessionListCacheDuration = 30 * time.Second
+			}
+			if cfg.SessionListCacheMaxUsers == 0 {
+				cfg.SessionListCacheMaxUsers = 10000
 			}
 			if cfg.WebhookMaxBodyBytes == 0 {
 				cfg.WebhookMaxBodyBytes = 1 << 20
@@ -1228,6 +1274,11 @@ The WorkOS access token returned by AuthKit is a JWT. It MUST be verified locall
 
 The decoded access token includes `sid` (session ID) and `sub` (user ID).
 
+Error taxonomy (MUST):
+- `errors.Is(err, ErrAccessTokenExpired)` for expiry-driven verification failures.
+- `errors.Is(err, ErrAccessTokenInvalid)` for malformed/signature/issuer/audience/claims failures.
+- `errors.Is(err, ErrJWKSUnavailable)` when JWKS cannot be fetched/decoded.
+
 ```go
 package workos
 
@@ -1294,19 +1345,29 @@ func (c *Client) getJWKS(ctx context.Context, force bool) (*jwksCache, error) {
 		return nil, &SafeError{msg: "workos: jwks request build failed", cause: err}
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	httpClient := c.jwksHTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, &SafeError{msg: "workos: jwks fetch failed", cause: err}
+		return nil, &SafeError{
+			msg:   "workos: jwks fetch failed",
+			cause: errors.Join(ErrJWKSUnavailable, err),
+		}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode/100 != 2 {
-		return nil, errors.New("workos: jwks fetch failed")
+		return nil, &SafeError{msg: "workos: jwks fetch failed", cause: ErrJWKSUnavailable}
 	}
 
 	var doc jwkDoc
 	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return nil, &SafeError{msg: "workos: jwks decode failed", cause: err}
+		return nil, &SafeError{
+			msg:   "workos: jwks decode failed",
+			cause: errors.Join(ErrJWKSUnavailable, err),
+		}
 	}
 
 	keys := make(map[string]*rsa.PublicKey, len(doc.Keys))
@@ -1458,7 +1519,8 @@ of underlying SDK shapes.
 **Cost note (important):** some WorkOS session revocation checks are implemented by
 listing sessions for a user and scanning for the session ID. This can be expensive
 for users with many active sessions. `vango-workos` mitigates this with a short,
-process-local per-user sessions cache (`SessionListCacheDuration`) and by allowing
+process-local per-user sessions cache (`SessionListCacheDuration`,
+`SessionListCacheMaxUsers`) and by allowing
 operators to disable periodic validation (`DisablePeriodicSessionValidation`) when
 necessary.
 
@@ -1566,6 +1628,7 @@ func parseWorkOSTime(s string) (time.Time, error) {
 
 type sessionListCacheEntry struct {
 	fetchedAt time.Time
+	lastUsed  time.Time
 	sessions  map[string]*SessionInfo // sessionID -> info
 }
 
@@ -1584,11 +1647,15 @@ func (c *Client) listSessionsForUser(ctx context.Context, userID string) (map[st
 
 	ttl := c.cfg.SessionListCacheDuration
 	if ttl > 0 {
+		now := time.Now()
 		c.sessionsMu.Lock()
 		if c.sessionsCache == nil {
 			c.sessionsCache = make(map[string]sessionListCacheEntry)
 		}
-		if ent, ok := c.sessionsCache[userID]; ok && time.Since(ent.fetchedAt) < ttl && ent.sessions != nil {
+		c.pruneSessionsCacheLocked(now)
+		if ent, ok := c.sessionsCache[userID]; ok && now.Sub(ent.fetchedAt) < ttl && ent.sessions != nil {
+			ent.lastUsed = now
+			c.sessionsCache[userID] = ent
 			s := ent.sessions
 			c.sessionsMu.Unlock()
 			return s, nil
@@ -1630,10 +1697,13 @@ func (c *Client) listSessionsForUser(ctx context.Context, userID string) (map[st
 		if c.sessionsCache == nil {
 			c.sessionsCache = make(map[string]sessionListCacheEntry)
 		}
+		now := time.Now()
 		c.sessionsCache[userID] = sessionListCacheEntry{
-			fetchedAt: time.Now(),
+			fetchedAt: now,
+			lastUsed:  now,
 			sessions:  sessions,
 		}
+		c.pruneSessionsCacheLocked(now)
 		c.sessionsMu.Unlock()
 	}
 
@@ -1709,7 +1779,7 @@ func (c *Client) SignInHandler(w http.ResponseWriter, r *http.Request) {
 		ClientID:    c.cfg.ClientID,
 		RedirectURI: c.cfg.RedirectURI,
 		State:       state,
-		Provider:    "", // empty = AuthKit handles provider selection
+		Provider:    "authkit",
 	})
 	if err != nil {
 		http.Error(w, "Failed to generate sign-in URL", http.StatusInternalServerError)
@@ -1731,6 +1801,7 @@ func (c *Client) SignUpHandler(w http.ResponseWriter, r *http.Request) {
 		ClientID:    c.cfg.ClientID,
 		RedirectURI: c.cfg.RedirectURI,
 		State:       state,
+		Provider:    "authkit",
 		ScreenHint:  "sign-up",
 	})
 	if err != nil {
@@ -2044,6 +2115,7 @@ package workos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -2079,12 +2151,20 @@ func (c *Client) Middleware() func(http.Handler) http.Handler {
 				// Validate access token locally (JWKS + claims).
 				claims, err := c.VerifyAccessToken(r.Context(), accessToken)
 				if err != nil {
-					// If access token is invalid for any reason, clear the cookie.
-					// Treat as unauthenticated and allow the request to proceed.
-					clearSessionCookie(w, c.cfg)
-					next.ServeHTTP(w, r)
-				return
-			}
+					switch {
+					case errors.Is(err, ErrJWKSUnavailable):
+						// Transient JWKS failures must not clear cookie state.
+						next.ServeHTTP(w, r)
+						return
+					case errors.Is(err, ErrAccessTokenExpired):
+						// Attempt refresh below.
+					default:
+						// Hard-invalid token: clear cookie and continue unauthenticated.
+						clearSessionCookie(w, c.cfg)
+						next.ServeHTTP(w, r)
+						return
+					}
+				}
 
 				// If expired, optionally attempt refresh (refresh tokens are single-use; see §1.5.4 / §H.5.4).
 				if !claims.ExpiresAt.IsZero() && time.Now().After(claims.ExpiresAt) {
@@ -2511,12 +2591,15 @@ type WebhookEvent struct {
 
 ## 1.9 Admin Portal Link Generation
 
+WorkOS SDK v6 Admin Portal link generation is implemented via `pkg/portal`.
+
 ```go
 package workos
 
 import (
 	"context"
-	"fmt"
+
+	"github.com/workos/workos-go/v6/pkg/portal"
 )
 
 // AdminPortalIntent specifies what the Admin Portal shows.
@@ -2527,7 +2610,8 @@ const (
 	AdminPortalDSync        AdminPortalIntent = "dsync"
 	AdminPortalAuditLogs    AdminPortalIntent = "audit_logs"
 	AdminPortalLogStreams   AdminPortalIntent = "log_streams"
-	AdminPortalCertRenewal AdminPortalIntent = "certificate_renewal"
+	AdminPortalCertRenewal  AdminPortalIntent = "certificate_renewal"
+	AdminPortalDomainVerification AdminPortalIntent = "domain_verification"
 )
 
 // GenerateAdminPortalLink creates a short-lived URL that gives an
@@ -2552,15 +2636,18 @@ func (c *Client) GenerateAdminPortalLink(
 	intent AdminPortalIntent,
 	returnURL string,
 ) (string, error) {
-	resp, err := c.orgs.GeneratePortalLink(ctx, organizations.GeneratePortalLinkOpts{
+	link, err := c.portal.GenerateLink(ctx, portal.GenerateLinkOpts{
 		Organization: organizationID,
-		Intent:       string(intent),
+		Intent:       portal.GenerateLinkIntent(intent),
 		ReturnURL:    returnURL,
 	})
 	if err != nil {
-		return "", fmt.Errorf("workos: admin portal link: %w", err)
+		return "", &SafeError{
+			msg:   "workos: admin portal link failed",
+			cause: err,
+		}
 	}
-	return resp.Link, nil
+	return link, nil
 }
 ```
 
@@ -3327,9 +3414,15 @@ WorkOS API rate limits vary by endpoint. The `vango-workos` package does not imp
 The package defaults to **local JWT validation** for performance (no network call per request):
 
 1. Fetch JWKS from WorkOS on first use.
-2. Cache for `JWKSCacheDuration` (default: 1 hour).
-3. Validate the `exp`, `iss`, and `aud` claims locally (issuer/audience configurable via `JWTIssuer`/`JWTAudience` for custom auth domains).
-4. Periodically revalidate the session with WorkOS (via `AuthCheck`) for revocation detection.
+2. Bound each JWKS fetch by `JWKSFetchTimeout` (default: 5 seconds).
+3. Cache for `JWKSCacheDuration` (default: 1 hour).
+4. Validate the `exp`, `iss`, and `aud` claims locally (issuer/audience configurable via `JWTIssuer`/`JWTAudience` for custom auth domains).
+5. Periodically revalidate the session with WorkOS (via `AuthCheck`) for revocation detection.
+
+Failure classification at the middleware boundary uses typed errors:
+- `ErrAccessTokenExpired`: refresh path (when enabled).
+- `ErrAccessTokenInvalid`: clear cookie and continue unauthenticated.
+- `ErrJWKSUnavailable`: continue unauthenticated without clearing cookie.
 
 This balances speed (sub-millisecond validation per request) with security (revoked sessions detected within `RevalidationInterval`).
 
@@ -3339,12 +3432,14 @@ Production defaults enforced by the package:
 
 | Attribute | Default | Rationale |
 |---|---|---|
-| `Secure` | `true` | HTTPS required in production |
+| `Secure` | `true` for `https://` BaseURL, `false` for local `http://` BaseURL | HTTPS required in production, local HTTP compatibility |
 | `HttpOnly` | `true` | Prevents XSS cookie theft |
 | `SameSite` | `Lax` | CSRF protection with usability |
 | `Path` | `/` | Available to all routes |
 | `MaxAge` | 7 days | Matches WorkOS default session length |
 | `Encryption` | AES-256-GCM | Cookie payload encrypted with `CookieSecret` |
+
+Browser invariant: `SameSite=None` always forces `Secure=true`.
 
 **Session tokens stored in cookies:** The encrypted cookie contains the access token and refresh token. These are sensitive and must never be logged, included in error messages, or transmitted in URLs.
 

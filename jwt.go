@@ -15,6 +15,14 @@ var (
 	errJWTUnknownKID    = errors.New("workos: unknown jwt kid")
 )
 
+func invalidTokenError(msg string) error {
+	return &SafeError{msg: msg, cause: ErrAccessTokenInvalid}
+}
+
+func expiredTokenError() error {
+	return &SafeError{msg: "workos: invalid access token", cause: ErrAccessTokenExpired}
+}
+
 type rawAccessTokenClaims struct {
 	jwt.RegisteredClaims
 	OrgID        string   `json:"org_id,omitempty"`
@@ -42,7 +50,7 @@ func audienceContains(aud jwt.ClaimStrings, want string) bool {
 // VerifyAccessToken validates a WorkOS access token locally using JWKS.
 func (c *Client) VerifyAccessToken(ctx context.Context, accessToken string) (*AccessTokenClaims, error) {
 	if strings.TrimSpace(accessToken) == "" {
-		return nil, errors.New("workos: access token required")
+		return nil, invalidTokenError("workos: access token required")
 	}
 
 	cache, err := c.getJWKS(ctx, false)
@@ -79,27 +87,29 @@ func (c *Client) VerifyAccessToken(ctx context.Context, accessToken string) (*Ac
 	if err != nil {
 		switch {
 		case errors.Is(err, errJWTUnexpectedAlg):
-			return nil, errors.New("workos: unexpected jwt alg")
+			return nil, invalidTokenError("workos: unexpected jwt alg")
 		case errors.Is(err, errJWTMissingKID):
-			return nil, errors.New("workos: jwt missing kid")
+			return nil, invalidTokenError("workos: jwt missing kid")
 		case errors.Is(err, errJWTUnknownKID):
-			return nil, errors.New("workos: unknown jwt kid")
+			return nil, invalidTokenError("workos: unknown jwt kid")
+		case errors.Is(err, jwt.ErrTokenExpired):
+			return nil, expiredTokenError()
 		default:
-			return nil, errors.New("workos: invalid access token")
+			return nil, invalidTokenError("workos: invalid access token")
 		}
 	}
 	if token == nil || !token.Valid {
-		return nil, errors.New("workos: invalid access token")
+		return nil, invalidTokenError("workos: invalid access token")
 	}
 
 	if normalizeIssuer(claims.Issuer) != normalizeIssuer(c.cfg.JWTIssuer) {
-		return nil, errors.New("workos: invalid token issuer")
+		return nil, invalidTokenError("workos: invalid token issuer")
 	}
 	if !audienceContains(claims.Audience, c.cfg.JWTAudience) {
-		return nil, errors.New("workos: invalid token audience")
+		return nil, invalidTokenError("workos: invalid token audience")
 	}
 	if claims.Subject == "" || claims.SID == "" {
-		return nil, errors.New("workos: invalid token claims")
+		return nil, invalidTokenError("workos: invalid token claims")
 	}
 
 	roles := make([]string, 0, 1+len(claims.Roles))

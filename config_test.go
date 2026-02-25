@@ -32,6 +32,10 @@ func TestNewValidation(t *testing.T) {
 		{name: "short cookie fallback", cfg: func() Config { c := validConfig(); c.CookieSecretFallbacks = []string{"short"}; return c }(), wantErr: "workos: CookieSecretFallbacks entries must be at least 32 characters"},
 		{name: "missing base url", cfg: func() Config { c := validConfig(); c.BaseURL = ""; return c }(), wantErr: "workos: BaseURL is required"},
 		{name: "invalid base url", cfg: func() Config { c := validConfig(); c.BaseURL = "://bad"; return c }(), wantErr: "workos: BaseURL is invalid"},
+		{name: "base url missing scheme", cfg: func() Config { c := validConfig(); c.BaseURL = "app.example.com"; return c }(), wantErr: "workos: BaseURL is invalid"},
+		{name: "base url unsupported scheme", cfg: func() Config { c := validConfig(); c.BaseURL = "ftp://app.example.com"; return c }(), wantErr: "workos: BaseURL is invalid"},
+		{name: "negative jwks timeout", cfg: func() Config { c := validConfig(); c.JWKSFetchTimeout = -1; return c }(), wantErr: "workos: JWKSFetchTimeout cannot be negative"},
+		{name: "negative session cache max users", cfg: func() Config { c := validConfig(); c.SessionListCacheMaxUsers = -1; return c }(), wantErr: "workos: SessionListCacheMaxUsers cannot be negative"},
 	}
 
 	for _, tt := range tests {
@@ -69,6 +73,9 @@ func TestNewDefaults(t *testing.T) {
 	if cfg.JWKSCacheDuration != time.Hour {
 		t.Fatalf("JWKSCacheDuration = %v", cfg.JWKSCacheDuration)
 	}
+	if cfg.JWKSFetchTimeout != 5*time.Second {
+		t.Fatalf("JWKSFetchTimeout = %v", cfg.JWKSFetchTimeout)
+	}
 	if cfg.JWKSURL == "" {
 		t.Fatal("JWKSURL should be defaulted")
 	}
@@ -90,6 +97,9 @@ func TestNewDefaults(t *testing.T) {
 	if cfg.SessionListCacheDuration != 30*time.Second {
 		t.Fatalf("SessionListCacheDuration = %v", cfg.SessionListCacheDuration)
 	}
+	if cfg.SessionListCacheMaxUsers != 10000 {
+		t.Fatalf("SessionListCacheMaxUsers = %d", cfg.SessionListCacheMaxUsers)
+	}
 	if cfg.WebhookMaxBodyBytes != 1<<20 {
 		t.Fatalf("WebhookMaxBodyBytes = %d", cfg.WebhookMaxBodyBytes)
 	}
@@ -98,6 +108,21 @@ func TestNewDefaults(t *testing.T) {
 	}
 	if cfg.EnableAuditLogs {
 		t.Fatal("EnableAuditLogs should default to false")
+	}
+}
+
+func TestNew_SameSiteNoneForcesSecure(t *testing.T) {
+	cfg := validConfig()
+	cfg.BaseURL = "http://localhost:8080"
+	cfg.CookieSecure = false
+	cfg.CookieSameSite = "none"
+
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if !c.cfg.CookieSecure {
+		t.Fatal("CookieSecure should be forced true when CookieSameSite is none")
 	}
 }
 

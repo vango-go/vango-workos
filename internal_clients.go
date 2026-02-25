@@ -7,6 +7,7 @@ import (
 	"github.com/workos/workos-go/v6/pkg/auditlogs"
 	"github.com/workos/workos-go/v6/pkg/directorysync"
 	"github.com/workos/workos-go/v6/pkg/organizations"
+	"github.com/workos/workos-go/v6/pkg/portal"
 	"github.com/workos/workos-go/v6/pkg/sso"
 	"github.com/workos/workos-go/v6/pkg/usermanagement"
 	"github.com/workos/workos-go/v6/pkg/webhooks"
@@ -48,7 +49,14 @@ type orgsClient interface {
 	ListOrganizations(ctx context.Context, opts organizations.ListOrganizationsOpts) (organizations.ListOrganizationsResponse, error)
 	ListOrganizationRoles(ctx context.Context, opts organizations.ListOrganizationRolesOpts) (organizations.ListOrganizationRolesResponse, error)
 }
-type webhookVerifier interface{ privateWebhookVerifier() }
+type portalClient interface {
+	privatePortalClient()
+	GenerateLink(ctx context.Context, opts portal.GenerateLinkOpts) (string, error)
+}
+type webhookVerifier interface {
+	privateWebhookVerifier()
+	VerifyWebhook(body []byte, signature, secret string) error
+}
 
 type realUMClient struct{ client *usermanagement.Client }
 
@@ -150,6 +158,20 @@ func (c *realOrgsClient) ListOrganizationRoles(ctx context.Context, opts organiz
 	return c.client.ListOrganizationRoles(ctx, opts)
 }
 
+type realPortalClient struct{ client *portal.Client }
+
+func (*realPortalClient) privatePortalClient() {}
+
+func (c *realPortalClient) GenerateLink(ctx context.Context, opts portal.GenerateLinkOpts) (string, error) {
+	return c.client.GenerateLink(ctx, opts)
+}
+
 type realWebhookVerifier struct{ client *webhooks.Client }
 
 func (*realWebhookVerifier) privateWebhookVerifier() {}
+
+func (c *realWebhookVerifier) VerifyWebhook(body []byte, signature, secret string) error {
+	verifier := webhooks.NewClient(secret)
+	_, err := verifier.ValidatePayload(signature, string(body))
+	return err
+}

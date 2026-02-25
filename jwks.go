@@ -57,22 +57,38 @@ func (c *Client) getJWKS(ctx context.Context, force bool) (*jwksCache, error) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.JWKSURL, nil)
 	if err != nil {
-		return nil, &SafeError{msg: "workos: jwks request build failed", cause: err}
+		return nil, &SafeError{
+			msg:   "workos: jwks request build failed",
+			cause: errors.Join(ErrJWKSUnavailable, err),
+		}
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	httpClient := c.jwksHTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, &SafeError{msg: "workos: jwks fetch failed", cause: err}
+		return nil, &SafeError{
+			msg:   "workos: jwks fetch failed",
+			cause: errors.Join(ErrJWKSUnavailable, err),
+		}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode/100 != 2 {
-		return nil, errors.New("workos: jwks fetch failed")
+		return nil, &SafeError{
+			msg:   "workos: jwks fetch failed",
+			cause: ErrJWKSUnavailable,
+		}
 	}
 
 	var doc jwkDoc
 	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return nil, &SafeError{msg: "workos: jwks decode failed", cause: err}
+		return nil, &SafeError{
+			msg:   "workos: jwks decode failed",
+			cause: errors.Join(ErrJWKSUnavailable, err),
+		}
 	}
 
 	keys := make(map[string]*rsa.PublicKey, len(doc.Keys))

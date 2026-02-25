@@ -8,4 +8,6 @@
 //     Tokens must not be stored in Vango session KV.
 //   - Blocking WorkOS API calls belong in HTTP handlers, Resource loaders, or
 //     Action work functions, never on the Vango session loop.
+//   - Deterministic test helpers (TestAuth/TestIdentity/HydrateSessionForTest)
+//     are provided for downstream unit tests without network dependencies.
 package workos

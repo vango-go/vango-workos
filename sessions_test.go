@@ -15,6 +15,7 @@ func newSessionTestClient(um *fakeUMClient, ttl time.Duration) *Client {
 	return &Client{
 		cfg: Config{
 			SessionListCacheDuration: ttl,
+			SessionListCacheMaxUsers: 10000,
 		},
 		um: um,
 	}
@@ -231,6 +232,50 @@ func TestValidateSession_UpstreamError(t *testing.T) {
 	}
 	if err.Error() != "workos: session validation failed" {
 		t.Fatalf("error = %q", err.Error())
+	}
+}
+
+func TestValidateSession_CacheBoundedByMaxUsers(t *testing.T) {
+	var calls int32
+	um := &fakeUMClient{
+		listSessionsFunc: func(_ context.Context, userID string, _ usermanagement.ListSessionsOpts) (usermanagement.ListSessionsResponse, error) {
+			atomic.AddInt32(&calls, 1)
+			return usermanagement.ListSessionsResponse{
+				Data: []usermanagement.Session{{
+					ID:        "sess_" + userID,
+					UserID:    userID,
+					Status:    "active",
+					ExpiresAt: time.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339Nano),
+				}},
+			}, nil
+		},
+	}
+	c := &Client{
+		cfg: Config{
+			SessionListCacheDuration: time.Minute,
+			SessionListCacheMaxUsers: 2,
+		},
+		um: um,
+	}
+
+	if _, err := c.ValidateSession(context.Background(), "user_1", "sess_user_1"); err != nil {
+		t.Fatalf("ValidateSession(user_1) error = %v", err)
+	}
+	if _, err := c.ValidateSession(context.Background(), "user_2", "sess_user_2"); err != nil {
+		t.Fatalf("ValidateSession(user_2) error = %v", err)
+	}
+	if _, err := c.ValidateSession(context.Background(), "user_3", "sess_user_3"); err != nil {
+		t.Fatalf("ValidateSession(user_3) error = %v", err)
+	}
+
+	if len(c.sessionsCache) != 2 {
+		t.Fatalf("sessionsCache len = %d, want 2", len(c.sessionsCache))
+	}
+	if _, ok := c.sessionsCache["user_1"]; ok {
+		t.Fatal("expected oldest cache entry user_1 to be evicted")
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("ListSessions calls = %d, want 3", got)
 	}
 }
 
