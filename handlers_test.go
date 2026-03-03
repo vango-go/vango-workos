@@ -501,22 +501,28 @@ func TestRegisterAuthHandlers(t *testing.T) {
 		}
 	})
 
-	t.Run("nil csrf middleware is tolerated", func(t *testing.T) {
+	t.Run("nil csrf middleware panics", func(t *testing.T) {
 		mux := http.NewServeMux()
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected panic")
+			}
+			msg, ok := r.(string)
+			if !ok {
+				t.Fatalf("panic type = %T, want string", r)
+			}
+			if !strings.Contains(msg, "csrf middleware is required") || !strings.Contains(msg, "/auth/logout") {
+				t.Fatalf("panic message = %q", msg)
+			}
+		}()
 		client.RegisterAuthHandlers(mux, nil)
-		req := httptest.NewRequest(http.MethodGet, "http://example.test/auth/signin", nil)
-		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, req)
-
-		if w.Result().StatusCode != http.StatusTemporaryRedirect {
-			t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusTemporaryRedirect)
-		}
 	})
 
 	t.Run("custom SignOutRedirectURI is registered with legacy alias", func(t *testing.T) {
 		mux := http.NewServeMux()
 		client.cfg.SignOutRedirectURI = "/post-logout"
-		client.RegisterAuthHandlers(mux, nil)
+		client.RegisterAuthHandlers(mux, func(next http.Handler) http.Handler { return next })
 
 		t.Run("configured signed-out path", func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "http://example.test/post-logout", nil)
@@ -564,7 +570,7 @@ func TestRegisterAuthHandlers(t *testing.T) {
 	t.Run("default SignOutRedirectURI does not double register", func(t *testing.T) {
 		mux := http.NewServeMux()
 		client.cfg.SignOutRedirectURI = "/auth/signed-out"
-		client.RegisterAuthHandlers(mux, nil)
+		client.RegisterAuthHandlers(mux, func(next http.Handler) http.Handler { return next })
 
 		req := httptest.NewRequest(http.MethodGet, "http://example.test/auth/signed-out", nil)
 		w := httptest.NewRecorder()

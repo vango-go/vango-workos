@@ -8,21 +8,20 @@ import (
 	"github.com/vango-go/vango"
 )
 
+var middlewareReadSessionCookie = readSessionCookie
+
 func (c *Client) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			cookieSess, err := readSessionCookie(r, c.cfg)
+			// Fail open at cookie read/decrypt boundary: treat as unauthenticated and
+			// continue without mutating cookie state.
+			cookieSess, err := middlewareReadSessionCookie(r, c.cfg)
 			if err != nil {
-				if errors.Is(err, http.ErrNoCookie) {
-					next.ServeHTTP(w, r)
-					return
-				}
-				clearSessionCookie(w, c.cfg)
 				next.ServeHTTP(w, r)
 				return
 			}
 			if cookieSess == nil {
-				clearSessionCookie(w, c.cfg)
+				// Defensive branch for unexpected nil session snapshots.
 				next.ServeHTTP(w, r)
 				return
 			}

@@ -286,7 +286,7 @@ const signedOutJS = `(function () {
 
 func (c *Client) RegisterAuthHandlers(mux *http.ServeMux, csrfMw func(http.Handler) http.Handler) {
 	if csrfMw == nil {
-		csrfMw = func(next http.Handler) http.Handler { return next }
+		panic("workos: csrf middleware is required for /auth/logout; pass app.Server().CSRFMiddleware()")
 	}
 
 	// Canonical signed-out landing path comes from config.
@@ -298,6 +298,7 @@ func (c *Client) RegisterAuthHandlers(mux *http.ServeMux, csrfMw func(http.Handl
 	mux.HandleFunc("/auth/signin", c.SignInHandler)
 	mux.HandleFunc("/auth/signup", c.SignUpHandler)
 	mux.HandleFunc("/auth/callback", c.CallbackHandler)
+	// Logout must be CSRF-protected at registration time.
 	mux.Handle("/auth/logout", csrfMw(http.HandlerFunc(c.LogoutHandler)))
 	mux.HandleFunc(signOutPath, c.SignedOutHandler)
 	// Backward-compatibility alias for existing integrations that still link to

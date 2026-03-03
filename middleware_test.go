@@ -142,7 +142,7 @@ func TestMiddleware_ValidCookieAttachesIdentity(t *testing.T) {
 	}
 }
 
-func TestMiddleware_InvalidCookieClearsAndPassesThrough(t *testing.T) {
+func TestMiddleware_InvalidCookiePassesThroughWithoutMutation(t *testing.T) {
 	client, ts := newMiddlewareClientWithJWKS(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(jwkDoc{})
 	})
@@ -163,13 +163,43 @@ func TestMiddleware_InvalidCookieClearsAndPassesThrough(t *testing.T) {
 	if gotUser != nil {
 		t.Fatalf("user = %#v, want nil", gotUser)
 	}
-	setCookies := w.Result().Header.Values("Set-Cookie")
-	if len(setCookies) == 0 {
-		t.Fatal("expected clear cookie header")
+	if got := len(w.Result().Header.Values("Set-Cookie")); got != 0 {
+		t.Fatalf("unexpected Set-Cookie headers: %v", w.Result().Header.Values("Set-Cookie"))
 	}
-	joined := setCookies[0]
-	if !(strings.Contains(joined, "Max-Age=0") || strings.Contains(joined, "Max-Age=-1")) {
-		t.Fatalf("expected cookie clear Max-Age header, got: %v", setCookies)
+}
+
+func TestMiddleware_NilCookieSessionPassesThroughWithoutMutation(t *testing.T) {
+	client, ts := newMiddlewareClientWithJWKS(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(jwkDoc{})
+	})
+	defer ts.Close()
+
+	origReadSessionCookie := middlewareReadSessionCookie
+	middlewareReadSessionCookie = func(_ *http.Request, _ Config) (*cookieSession, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		middlewareReadSessionCookie = origReadSessionCookie
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/private", nil)
+	var gotUser any
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = vango.UserFromContext(r.Context())
+		w.WriteHeader(http.StatusAccepted)
+	})
+	h := client.Middleware()(next)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if gotUser != nil {
+		t.Fatalf("user = %#v, want nil", gotUser)
+	}
+	if w.Result().StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusAccepted)
+	}
+	if got := len(w.Result().Header.Values("Set-Cookie")); got != 0 {
+		t.Fatalf("unexpected Set-Cookie headers: %v", w.Result().Header.Values("Set-Cookie"))
 	}
 }
 
