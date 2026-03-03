@@ -512,4 +512,66 @@ func TestRegisterAuthHandlers(t *testing.T) {
 			t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusTemporaryRedirect)
 		}
 	})
+
+	t.Run("custom SignOutRedirectURI is registered with legacy alias", func(t *testing.T) {
+		mux := http.NewServeMux()
+		client.cfg.SignOutRedirectURI = "/post-logout"
+		client.RegisterAuthHandlers(mux, nil)
+
+		t.Run("configured signed-out path", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://example.test/post-logout", nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+
+			if w.Result().StatusCode != http.StatusOK {
+				t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusOK)
+			}
+			if got := w.Result().Header.Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("Cache-Control = %q, want %q", got, "no-store")
+			}
+			if got := w.Result().Header.Get("Content-Type"); got != "text/html; charset=utf-8" {
+				t.Fatalf("Content-Type = %q, want %q", got, "text/html; charset=utf-8")
+			}
+			if body := w.Body.String(); !strings.Contains(body, `<script src="/auth/signed-out.js" defer></script>`) {
+				t.Fatalf("body = %q", body)
+			}
+		})
+
+		t.Run("legacy alias path", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://example.test/auth/signed-out", nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+
+			if w.Result().StatusCode != http.StatusOK {
+				t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusOK)
+			}
+		})
+
+		t.Run("fixed script path", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://example.test/auth/signed-out.js", nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+
+			if w.Result().StatusCode != http.StatusOK {
+				t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusOK)
+			}
+			if got := w.Result().Header.Get("Content-Type"); got != "application/javascript; charset=utf-8" {
+				t.Fatalf("Content-Type = %q, want %q", got, "application/javascript; charset=utf-8")
+			}
+		})
+	})
+
+	t.Run("default SignOutRedirectURI does not double register", func(t *testing.T) {
+		mux := http.NewServeMux()
+		client.cfg.SignOutRedirectURI = "/auth/signed-out"
+		client.RegisterAuthHandlers(mux, nil)
+
+		req := httptest.NewRequest(http.MethodGet, "http://example.test/auth/signed-out", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Result().StatusCode != http.StatusOK {
+			t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusOK)
+		}
+	})
 }

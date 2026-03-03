@@ -218,6 +218,9 @@ func (c *Client) SignedOutHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(signedOutHTML(returnTo)))
 }
 
+// signedOutHTML renders the post-logout landing page. The JS route is fixed to
+// /auth/signed-out.js (same-origin, no inline script), while the HTML page route
+// itself is configured via Config.SignOutRedirectURI.
 func signedOutHTML(returnTo string) string {
 	rt := html.EscapeString(returnTo)
 	return fmt.Sprintf(`<!doctype html>
@@ -286,10 +289,22 @@ func (c *Client) RegisterAuthHandlers(mux *http.ServeMux, csrfMw func(http.Handl
 		csrfMw = func(next http.Handler) http.Handler { return next }
 	}
 
+	// Canonical signed-out landing path comes from config.
+	signOutPath := strings.TrimSpace(c.cfg.SignOutRedirectURI)
+	if signOutPath == "" {
+		signOutPath = "/auth/signed-out"
+	}
+
 	mux.HandleFunc("/auth/signin", c.SignInHandler)
 	mux.HandleFunc("/auth/signup", c.SignUpHandler)
 	mux.HandleFunc("/auth/callback", c.CallbackHandler)
 	mux.Handle("/auth/logout", csrfMw(http.HandlerFunc(c.LogoutHandler)))
-	mux.HandleFunc("/auth/signed-out", c.SignedOutHandler)
+	mux.HandleFunc(signOutPath, c.SignedOutHandler)
+	// Backward-compatibility alias for existing integrations that still link to
+	// /auth/signed-out when SignOutRedirectURI is customized.
+	if signOutPath != "/auth/signed-out" {
+		mux.HandleFunc("/auth/signed-out", c.SignedOutHandler)
+	}
+	// Script path stays fixed and same-origin.
 	mux.HandleFunc("/auth/signed-out.js", c.SignedOutScriptHandler)
 }

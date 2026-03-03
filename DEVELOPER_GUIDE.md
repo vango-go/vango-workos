@@ -610,3 +610,7 @@ Operational tuning:
 - `JWKSCacheDuration`, `JWKSFetchTimeout`, `JWKSURL`, `JWTIssuer`, `JWTAudience`
 - `CookieName`, `CookieMaxAge`, `CookieSecure`, `CookieSameSite`
 - `WebhookMaxBodyBytes`
+
+### WorkOS Vault Usage via official Go SDK (API Keys and Secrets)
+
+If your app uses WorkOS Vault to store tenant secrets (API keys, tokens, credentials), follow these rules. All Vault API calls must occur in Resource loaders, Action work functions, or HTTP handlers — the same lifecycle rule as any other I/O. Never store decrypted secret values in SharedSignal, GlobalSignal, SessionKey, or session runtime KV. Decrypted material should exist only as transient local variables in the work function that needs it. Always include organization_id in your Vault key context for tenant-scoped secrets, using the identity already available from workos.CurrentIdentity(ctx). Mark any struct field containing secret plaintext with json:"-" to prevent accidental serialization.

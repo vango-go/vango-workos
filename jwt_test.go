@@ -225,6 +225,30 @@ func TestVerifyAccessToken_MissingSubOrSID(t *testing.T) {
 	})
 }
 
+func TestVerifyAccessToken_MissingExp_ReturnsInvalidClaims(t *testing.T) {
+	key := mustRSAKey(t)
+	claims := baseClaims()
+	claims.ExpiresAt = nil
+	token := signRS256Token(t, key, "kid-1", claims)
+
+	client, ts := newJWTTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(jwkDoc{Keys: []jwkKey{rsaJWK(t, &key.PublicKey, "kid-1")}})
+	})
+	defer ts.Close()
+
+	_, err := client.VerifyAccessToken(context.Background(), token)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if err.Error() != "workos: invalid token claims" {
+		t.Fatalf("error = %q", err.Error())
+	}
+	if !errors.Is(err, ErrAccessTokenInvalid) {
+		t.Fatal("expected ErrAccessTokenInvalid")
+	}
+	assertNoSecretLeak(t, err.Error(), token)
+}
+
 func TestVerifyAccessToken_ExpiredTokenOutsideLeeway(t *testing.T) {
 	key := mustRSAKey(t)
 	claims := baseClaims()

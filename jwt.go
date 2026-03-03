@@ -59,7 +59,10 @@ func (c *Client) VerifyAccessToken(ctx context.Context, accessToken string) (*Ac
 	}
 
 	claims := &rawAccessTokenClaims{}
-	parser := jwt.NewParser(jwt.WithLeeway(30 * time.Second))
+	parser := jwt.NewParser(
+		jwt.WithLeeway(30*time.Second),
+		jwt.WithExpirationRequired(),
+	)
 
 	token, err := parser.ParseWithClaims(accessToken, claims, func(tok *jwt.Token) (any, error) {
 		alg, _ := tok.Header["alg"].(string)
@@ -92,6 +95,8 @@ func (c *Client) VerifyAccessToken(ctx context.Context, accessToken string) (*Ac
 			return nil, invalidTokenError("workos: jwt missing kid")
 		case errors.Is(err, errJWTUnknownKID):
 			return nil, invalidTokenError("workos: unknown jwt kid")
+		case errors.Is(err, jwt.ErrTokenRequiredClaimMissing):
+			return nil, invalidTokenError("workos: invalid token claims")
 		case errors.Is(err, jwt.ErrTokenExpired):
 			return nil, expiredTokenError()
 		default:
@@ -111,6 +116,9 @@ func (c *Client) VerifyAccessToken(ctx context.Context, accessToken string) (*Ac
 	if claims.Subject == "" || claims.SID == "" {
 		return nil, invalidTokenError("workos: invalid token claims")
 	}
+	if claims.ExpiresAt == nil || claims.ExpiresAt.Time.IsZero() {
+		return nil, invalidTokenError("workos: invalid token claims")
+	}
 
 	roles := make([]string, 0, 1+len(claims.Roles))
 	if claims.Role != "" {
@@ -118,10 +126,7 @@ func (c *Client) VerifyAccessToken(ctx context.Context, accessToken string) (*Ac
 	}
 	roles = append(roles, claims.Roles...)
 
-	var exp time.Time
-	if claims.ExpiresAt != nil {
-		exp = claims.ExpiresAt.Time
-	}
+	exp := claims.ExpiresAt.Time
 
 	aud := ""
 	if len(claims.Audience) > 0 {
