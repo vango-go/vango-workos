@@ -21,10 +21,14 @@ const (
 )
 
 type cookieSession struct {
-	V            int       `json:"v"`
-	IssuedAtUnix int64     `json:"iat_unix_ms"`
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token"`
+	V            int    `json:"v"`
+	IssuedAtUnix int64  `json:"iat_unix_ms"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	// OrgID is an authoritative organization binding for tenancy when the access
+	// token does not include an org_id claim. It MUST only be populated from WorkOS
+	// responses (callback OrganizationID / ValidateSession), never from IdentityHint.
+	OrgID        string    `json:"org_id,omitempty"`
 	IdentityHint *Identity `json:"identity_hint,omitempty"`
 }
 

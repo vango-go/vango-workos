@@ -3,6 +3,8 @@ package workos
 import (
 	"testing"
 	"time"
+
+	"github.com/vango-go/vango"
 )
 
 func validConfig() Config {
@@ -36,6 +38,7 @@ func TestNewValidation(t *testing.T) {
 		{name: "base url unsupported scheme", cfg: func() Config { c := validConfig(); c.BaseURL = "ftp://app.example.com"; return c }(), wantErr: "workos: BaseURL is invalid"},
 		{name: "negative jwks timeout", cfg: func() Config { c := validConfig(); c.JWKSFetchTimeout = -1; return c }(), wantErr: "workos: JWKSFetchTimeout cannot be negative"},
 		{name: "negative session cache max users", cfg: func() Config { c := validConfig(); c.SessionListCacheMaxUsers = -1; return c }(), wantErr: "workos: SessionListCacheMaxUsers cannot be negative"},
+		{name: "invalid revalidation failure mode", cfg: func() Config { c := validConfig(); c.RevalidationFailureMode = vango.AuthFailureMode(99); return c }(), wantErr: "workos: RevalidationFailureMode is invalid"},
 	}
 
 	for _, tt := range tests {
@@ -93,6 +96,9 @@ func TestNewDefaults(t *testing.T) {
 	}
 	if cfg.MaxStaleSession != 15*time.Minute {
 		t.Fatalf("MaxStaleSession = %v", cfg.MaxStaleSession)
+	}
+	if cfg.RevalidationFailureMode != vango.FailOpenWithGrace {
+		t.Fatalf("RevalidationFailureMode = %v", cfg.RevalidationFailureMode)
 	}
 	if cfg.SessionListCacheDuration != 30*time.Second {
 		t.Fatalf("SessionListCacheDuration = %v", cfg.SessionListCacheDuration)

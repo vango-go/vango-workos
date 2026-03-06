@@ -296,9 +296,47 @@ type WebhookEvent struct {
 	CreatedAt time.Time       `json:"created_at"`
 }
 
+// WebhookHandlerFunc is an error-capable webhook handler.
+// Returning a non-nil error causes the webhook endpoint to return a non-2xx
+// response so WorkOS can retry delivery.
+type WebhookHandlerFunc func(context.Context, WebhookEvent) error
+
+// WebhookClaimStatus describes the idempotency state for a webhook event key.
+type WebhookClaimStatus int
+
+const (
+	WebhookClaimAcquired WebhookClaimStatus = iota + 1
+	WebhookClaimDuplicate
+	WebhookClaimInFlight
+)
+
+// WebhookIdempotencyStore tracks webhook delivery by event ID.
+//
+// Implementations must use the returned token as a lease token: only the
+// current claimant may successfully mark the event processed.
+type WebhookIdempotencyStore interface {
+	Claim(ctx context.Context, key string, leaseTTL time.Duration) (WebhookClaimStatus, string, error)
+	MarkProcessed(ctx context.Context, key, token string, ttl time.Duration) error
+	Release(ctx context.Context, key, token string) error
+}
+
+// WebhookHandlerOptions controls webhook delivery behavior.
+type WebhookHandlerOptions struct {
+	// IdempotencyStore enables de-duplication by WebhookEvent.ID.
+	// When nil, deliveries are not de-duplicated by this package.
+	IdempotencyStore WebhookIdempotencyStore
+	// InFlightTTL is the lease duration for an in-progress delivery.
+	// Zero uses the default of 5 minutes.
+	InFlightTTL time.Duration
+	// ProcessedTTL is how long successfully processed event IDs are retained.
+	// Zero uses the default of 24 hours.
+	ProcessedTTL time.Duration
+}
+
 type WebhookSubscription struct {
-	Event   string
-	Handler func(context.Context, WebhookEvent)
+	Event      string
+	Handler    func(context.Context, WebhookEvent)
+	HandlerErr WebhookHandlerFunc
 }
 
 // AdminPortalIntent specifies what the Admin Portal shows.

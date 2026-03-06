@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeWebhookVerifier struct {
@@ -20,6 +21,33 @@ func (f *fakeWebhookVerifier) VerifyWebhook(body []byte, signature, secret strin
 		return errors.New("not mocked")
 	}
 	return f.verifyWebhookFunc(body, signature, secret)
+}
+
+type fakeWebhookIdempotencyStore struct {
+	claimFunc         func(context.Context, string, time.Duration) (WebhookClaimStatus, string, error)
+	markProcessedFunc func(context.Context, string, string, time.Duration) error
+	releaseFunc       func(context.Context, string, string) error
+}
+
+func (f *fakeWebhookIdempotencyStore) Claim(ctx context.Context, key string, leaseTTL time.Duration) (WebhookClaimStatus, string, error) {
+	if f.claimFunc == nil {
+		return 0, "", errors.New("claim not mocked")
+	}
+	return f.claimFunc(ctx, key, leaseTTL)
+}
+
+func (f *fakeWebhookIdempotencyStore) MarkProcessed(ctx context.Context, key, token string, ttl time.Duration) error {
+	if f.markProcessedFunc == nil {
+		return nil
+	}
+	return f.markProcessedFunc(ctx, key, token, ttl)
+}
+
+func (f *fakeWebhookIdempotencyStore) Release(ctx context.Context, key, token string) error {
+	if f.releaseFunc == nil {
+		return nil
+	}
+	return f.releaseFunc(ctx, key, token)
 }
 
 func newWebhookTestClient(t *testing.T, verifier webhookVerifier) *Client {
@@ -248,5 +276,342 @@ func TestWebhookHandler_EmptyOrNilSubscriptionsIgnored(t *testing.T) {
 	}
 	if called {
 		t.Fatal("expected ignored subscriptions to not be called")
+	}
+}
+
+func TestWebhookHandler_ErrorHandlerReturns500(t *testing.T) {
+	client := newWebhookTestClient(t, &fakeWebhookVerifier{
+		verifyWebhookFunc: func([]byte, string, string) error { return nil },
+	})
+
+	handler := client.WebhookHandler(
+		OnUserCreatedErr(func(context.Context, WebhookEvent) error {
+			return errors.New("boom")
+		}),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.test/webhooks/workos", strings.NewReader(`{"id":"evt_err_1","event":"user.created","data":{},"created_at":"2026-02-24T00:00:00Z"}`))
+	req.Header.Set("WorkOS-Signature", "t=123,v1=abc")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("StatusCode = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestWebhookHandler_WildcardErrorReturns500(t *testing.T) {
+	client := newWebhookTestClient(t, &fakeWebhookVerifier{
+		verifyWebhookFunc: func([]byte, string, string) error { return nil },
+	})
+
+	calledExact := 0
+	handler := client.WebhookHandler(
+		OnUserCreated(func(context.Context, WebhookEvent) { calledExact++ }),
+		OnAnyEventErr(func(context.Context, WebhookEvent) error {
+			return errors.New("wildcard failure")
+		}),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.test/webhooks/workos", strings.NewReader(`{"id":"evt_err_2","event":"user.created","data":{},"created_at":"2026-02-24T00:00:00Z"}`))
+	req.Header.Set("WorkOS-Signature", "t=123,v1=abc")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("StatusCode = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if calledExact != 1 {
+		t.Fatalf("calledExact = %d, want 1", calledExact)
+	}
+}
+
+func TestWebhookHandler_ExactFailurePreventsWildcard(t *testing.T) {
+	client := newWebhookTestClient(t, &fakeWebhookVerifier{
+		verifyWebhookFunc: func([]byte, string, string) error { return nil },
+	})
+
+	anyCalls := 0
+	handler := client.WebhookHandler(
+		OnUserCreatedErr(func(context.Context, WebhookEvent) error {
+			return errors.New("exact failure")
+		}),
+		OnAnyEvent(func(context.Context, WebhookEvent) { anyCalls++ }),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.test/webhooks/workos", strings.NewReader(`{"id":"evt_err_3","event":"user.created","data":{},"created_at":"2026-02-24T00:00:00Z"}`))
+	req.Header.Set("WorkOS-Signature", "t=123,v1=abc")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("StatusCode = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if anyCalls != 0 {
+		t.Fatalf("anyCalls = %d, want 0", anyCalls)
+	}
+}
+
+func TestWebhookHandler_PanicRecoveredReturns500(t *testing.T) {
+	client := newWebhookTestClient(t, &fakeWebhookVerifier{
+		verifyWebhookFunc: func([]byte, string, string) error { return nil },
+	})
+
+	handler := client.WebhookHandler(
+		OnUserCreated(func(context.Context, WebhookEvent) {
+			panic("kaboom")
+		}),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.test/webhooks/workos", strings.NewReader(`{"id":"evt_panic","event":"user.created","data":{},"created_at":"2026-02-24T00:00:00Z"}`))
+	req.Header.Set("WorkOS-Signature", "t=123,v1=abc")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("StatusCode = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestWebhookHandler_WildcardPanicReleasesClaimAndRetrySucceeds(t *testing.T) {
+	client := newWebhookTestClient(t, &fakeWebhookVerifier{
+		verifyWebhookFunc: func([]byte, string, string) error { return nil },
+	})
+
+	store := NewMemoryWebhookIdempotencyStore()
+	exactCalls := 0
+	wildcardCalls := 0
+	handler := client.WebhookHandlerWithOptions(
+		WebhookHandlerOptions{IdempotencyStore: store},
+		OnUserCreated(func(context.Context, WebhookEvent) {
+			exactCalls++
+		}),
+		OnAnyEventErr(func(context.Context, WebhookEvent) error {
+			wildcardCalls++
+			if wildcardCalls == 1 {
+				panic("wildcard kaboom")
+			}
+			return nil
+		}),
+	)
+
+	for i, wantStatus := range []int{http.StatusInternalServerError, http.StatusOK} {
+		req := httptest.NewRequest(http.MethodPost, "http://example.test/webhooks/workos", strings.NewReader(`{"id":"evt_panic_retry","event":"user.created","data":{},"created_at":"2026-02-24T00:00:00Z"}`))
+		req.Header.Set("WorkOS-Signature", "t=123,v1=abc")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != wantStatus {
+			t.Fatalf("attempt %d StatusCode = %d, want %d", i+1, w.Code, wantStatus)
+		}
+	}
+	if exactCalls != 2 {
+		t.Fatalf("exactCalls = %d, want 2", exactCalls)
+	}
+	if wildcardCalls != 2 {
+		t.Fatalf("wildcardCalls = %d, want 2", wildcardCalls)
+	}
+}
+
+func TestWebhookHandler_IdempotencyDuplicateProcessedReturns200(t *testing.T) {
+	client := newWebhookTestClient(t, &fakeWebhookVerifier{
+		verifyWebhookFunc: func([]byte, string, string) error { return nil },
+	})
+
+	calls := 0
+	store := &fakeWebhookIdempotencyStore{
+		claimFunc: func(context.Context, string, time.Duration) (WebhookClaimStatus, string, error) {
+			return WebhookClaimDuplicate, "", nil
+		},
+	}
+	handler := client.WebhookHandlerWithOptions(WebhookHandlerOptions{
+		IdempotencyStore: store,
+	}, OnUserCreated(func(context.Context, WebhookEvent) {
+		calls++
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.test/webhooks/workos", strings.NewReader(`{"id":"evt_dup","event":"user.created","data":{},"created_at":"2026-02-24T00:00:00Z"}`))
+	req.Header.Set("WorkOS-Signature", "t=123,v1=abc")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d", w.Code, http.StatusOK)
+	}
+	if calls != 0 {
+		t.Fatalf("calls = %d, want 0", calls)
+	}
+}
+
+func TestWebhookHandler_IdempotencyInFlightReturns503(t *testing.T) {
+	client := newWebhookTestClient(t, &fakeWebhookVerifier{
+		verifyWebhookFunc: func([]byte, string, string) error { return nil },
+	})
+
+	store := &fakeWebhookIdempotencyStore{
+		claimFunc: func(context.Context, string, time.Duration) (WebhookClaimStatus, string, error) {
+			return WebhookClaimInFlight, "", nil
+		},
+	}
+	handler := client.WebhookHandlerWithOptions(WebhookHandlerOptions{
+		IdempotencyStore: store,
+	}, OnUserCreated(func(context.Context, WebhookEvent) {}))
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.test/webhooks/workos", strings.NewReader(`{"id":"evt_inflight","event":"user.created","data":{},"created_at":"2026-02-24T00:00:00Z"}`))
+	req.Header.Set("WorkOS-Signature", "t=123,v1=abc")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("StatusCode = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestWebhookHandler_IdempotencyMissingEventIDReturns400(t *testing.T) {
+	client := newWebhookTestClient(t, &fakeWebhookVerifier{
+		verifyWebhookFunc: func([]byte, string, string) error { return nil },
+	})
+
+	store := &fakeWebhookIdempotencyStore{
+		claimFunc: func(context.Context, string, time.Duration) (WebhookClaimStatus, string, error) {
+			t.Fatal("Claim should not be called when event ID is missing")
+			return 0, "", nil
+		},
+	}
+	handler := client.WebhookHandlerWithOptions(WebhookHandlerOptions{
+		IdempotencyStore: store,
+	}, OnUserCreated(func(context.Context, WebhookEvent) {}))
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.test/webhooks/workos", strings.NewReader(`{"id":"   ","event":"user.created","data":{},"created_at":"2026-02-24T00:00:00Z"}`))
+	req.Header.Set("WorkOS-Signature", "t=123,v1=abc")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("StatusCode = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestWebhookHandler_IdempotencyClaimFailureReturns500(t *testing.T) {
+	client := newWebhookTestClient(t, &fakeWebhookVerifier{
+		verifyWebhookFunc: func([]byte, string, string) error { return nil },
+	})
+
+	store := &fakeWebhookIdempotencyStore{
+		claimFunc: func(context.Context, string, time.Duration) (WebhookClaimStatus, string, error) {
+			return 0, "", errors.New("claim failed")
+		},
+	}
+	handler := client.WebhookHandlerWithOptions(WebhookHandlerOptions{
+		IdempotencyStore: store,
+	}, OnUserCreated(func(context.Context, WebhookEvent) {}))
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.test/webhooks/workos", strings.NewReader(`{"id":"evt_claim_fail","event":"user.created","data":{},"created_at":"2026-02-24T00:00:00Z"}`))
+	req.Header.Set("WorkOS-Signature", "t=123,v1=abc")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("StatusCode = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestWebhookHandler_IdempotencyMarkProcessedFailureReturns500(t *testing.T) {
+	client := newWebhookTestClient(t, &fakeWebhookVerifier{
+		verifyWebhookFunc: func([]byte, string, string) error { return nil },
+	})
+
+	releaseCalls := 0
+	store := &fakeWebhookIdempotencyStore{
+		claimFunc: func(context.Context, string, time.Duration) (WebhookClaimStatus, string, error) {
+			return WebhookClaimAcquired, "tok_1", nil
+		},
+		markProcessedFunc: func(context.Context, string, string, time.Duration) error {
+			return errors.New("mark failed")
+		},
+		releaseFunc: func(context.Context, string, string) error {
+			releaseCalls++
+			return nil
+		},
+	}
+	handler := client.WebhookHandlerWithOptions(WebhookHandlerOptions{
+		IdempotencyStore: store,
+	}, OnUserCreated(func(context.Context, WebhookEvent) {}))
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.test/webhooks/workos", strings.NewReader(`{"id":"evt_mark_fail","event":"user.created","data":{},"created_at":"2026-02-24T00:00:00Z"}`))
+	req.Header.Set("WorkOS-Signature", "t=123,v1=abc")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("StatusCode = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if releaseCalls != 1 {
+		t.Fatalf("releaseCalls = %d, want 1", releaseCalls)
+	}
+}
+
+func TestWebhookHandler_IdempotencyReleaseFailureReturns500(t *testing.T) {
+	client := newWebhookTestClient(t, &fakeWebhookVerifier{
+		verifyWebhookFunc: func([]byte, string, string) error { return nil },
+	})
+
+	releaseCalls := 0
+	store := &fakeWebhookIdempotencyStore{
+		claimFunc: func(context.Context, string, time.Duration) (WebhookClaimStatus, string, error) {
+			return WebhookClaimAcquired, "tok_release", nil
+		},
+		releaseFunc: func(context.Context, string, string) error {
+			releaseCalls++
+			return errors.New("release failed")
+		},
+	}
+	handler := client.WebhookHandlerWithOptions(WebhookHandlerOptions{
+		IdempotencyStore: store,
+	}, OnUserCreatedErr(func(context.Context, WebhookEvent) error {
+		return errors.New("handler failed")
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.test/webhooks/workos", strings.NewReader(`{"id":"evt_release_fail","event":"user.created","data":{},"created_at":"2026-02-24T00:00:00Z"}`))
+	req.Header.Set("WorkOS-Signature", "t=123,v1=abc")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("StatusCode = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if releaseCalls != 1 {
+		t.Fatalf("releaseCalls = %d, want 1", releaseCalls)
+	}
+}
+
+func TestWebhookHandler_FailureReleasesClaimAndLaterRetrySucceeds(t *testing.T) {
+	client := newWebhookTestClient(t, &fakeWebhookVerifier{
+		verifyWebhookFunc: func([]byte, string, string) error { return nil },
+	})
+
+	store := NewMemoryWebhookIdempotencyStore()
+	attempts := 0
+	handler := client.WebhookHandlerWithOptions(WebhookHandlerOptions{
+		IdempotencyStore: store,
+	}, OnUserCreatedErr(func(context.Context, WebhookEvent) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("first attempt fails")
+		}
+		return nil
+	}))
+
+	for i, wantStatus := range []int{http.StatusInternalServerError, http.StatusOK} {
+		req := httptest.NewRequest(http.MethodPost, "http://example.test/webhooks/workos", strings.NewReader(`{"id":"evt_retry","event":"user.created","data":{},"created_at":"2026-02-24T00:00:00Z"}`))
+		req.Header.Set("WorkOS-Signature", "t=123,v1=abc")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != wantStatus {
+			t.Fatalf("attempt %d StatusCode = %d, want %d", i+1, w.Code, wantStatus)
+		}
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
 	}
 }

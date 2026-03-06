@@ -69,6 +69,9 @@ func (c *Client) RefreshTokens(ctx context.Context, refreshToken string) (*Token
 		}
 		claims, err := c.VerifyAccessToken(ctx, resp.AccessToken)
 		if err != nil {
+			if errors.Is(err, ErrJWKSUnavailable) {
+				return nil, jwksUnavailableError(err)
+			}
 			return nil, errors.New("workos: refresh failed")
 		}
 

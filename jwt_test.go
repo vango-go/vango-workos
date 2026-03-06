@@ -345,6 +345,43 @@ func TestVerifyAccessToken_UnknownKidAfterRefreshFails(t *testing.T) {
 	}
 }
 
+func TestVerifyAccessToken_UnknownKidRefreshJWKSFailureReturnsJWKSUnavailable(t *testing.T) {
+	keyA := mustRSAKey(t)
+	keyB := mustRSAKey(t)
+	claims := baseClaims()
+	token := signRS256Token(t, keyB, "kid-b", claims)
+
+	client, err := New(validConfig())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	client.cfg.JWKSURL = "http://127.0.0.1:1/unreachable"
+	client.cfg.JWKSFetchTimeout = 10 * time.Millisecond
+	client.cfg.JWTAudience = "client_test_audience"
+	client.jwksHTTPClient.Timeout = client.cfg.JWKSFetchTimeout
+	client.jwksCache = &jwksCache{
+		fetchedAt: time.Now(),
+		keys: map[string]*rsa.PublicKey{
+			"kid-a": &keyA.PublicKey,
+		},
+	}
+
+	_, err = client.VerifyAccessToken(context.Background(), token)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrJWKSUnavailable) {
+		t.Fatalf("expected ErrJWKSUnavailable, got err=%v", err)
+	}
+	if errors.Is(err, ErrAccessTokenInvalid) {
+		t.Fatalf("expected error to not be ErrAccessTokenInvalid, got err=%v", err)
+	}
+	if err.Error() != "workos: jwks unavailable" {
+		t.Fatalf("error = %q, want %q", err.Error(), "workos: jwks unavailable")
+	}
+	assertNoSecretLeak(t, err.Error(), token)
+}
+
 func TestVerifyAccessToken_DoesNotLeakTokenInError(t *testing.T) {
 	key := mustRSAKey(t)
 	claims := baseClaims()

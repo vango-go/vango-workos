@@ -53,6 +53,13 @@ func (b *Bridge) OnSessionResume(httpCtx context.Context, s *vango.Session) erro
 	if info == nil || !info.Active {
 		return fmt.Errorf("workos: session is no longer active")
 	}
+	if info.OrgID != "" {
+		if identity.OrgID == "" {
+			identity.OrgID = info.OrgID
+		} else if identity.OrgID != info.OrgID {
+			return fmt.Errorf("workos: session org mismatch")
+		}
+	}
 
 	auth.Set(s, identity)
 	auth.SetPrincipal(s, auth.Principal{
@@ -74,7 +81,7 @@ func (c *Client) RevalidationConfig() *vango.AuthCheckConfig {
 	return &vango.AuthCheckConfig{
 		Interval:    c.cfg.RevalidationInterval,
 		Timeout:     c.cfg.RevalidationTimeout,
-		FailureMode: vango.FailOpenWithGrace,
+		FailureMode: c.cfg.RevalidationFailureMode,
 		MaxStale:    c.cfg.MaxStaleSession,
 		Check: func(ctx context.Context, p auth.Principal) error {
 			info, err := c.ValidateSession(ctx, p.ID, p.SessionID)

@@ -1,6 +1,10 @@
 package workos
 
-import "time"
+import (
+	"time"
+
+	"github.com/vango-go/vango"
+)
 
 // Config controls behavior of the WorkOS integration.
 type Config struct {
@@ -28,9 +32,17 @@ type Config struct {
 	JWTIssuer         string
 	JWTAudience       string
 
-	RevalidationInterval             time.Duration
-	RevalidationTimeout              time.Duration
-	MaxStaleSession                  time.Duration
+	RevalidationInterval time.Duration
+	RevalidationTimeout  time.Duration
+	MaxStaleSession      time.Duration
+	// RevalidationFailureMode controls how periodic WorkOS session validation
+	// behaves when validation fails (e.g. WorkOS outage).
+	//
+	// Allowed values:
+	//  - vango.FailOpenWithGrace (default): keep session alive until MaxStaleSession
+	//    elapses without a successful validation.
+	//  - vango.FailClosed: expire session immediately on any validation failure.
+	RevalidationFailureMode          vango.AuthFailureMode
 	DisablePeriodicSessionValidation bool
 	SessionListCacheDuration         time.Duration
 	SessionListCacheMaxUsers         int

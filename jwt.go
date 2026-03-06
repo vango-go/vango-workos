@@ -23,6 +23,13 @@ func expiredTokenError() error {
 	return &SafeError{msg: "workos: invalid access token", cause: ErrAccessTokenExpired}
 }
 
+func jwksUnavailableError(cause error) error {
+	if cause == nil {
+		cause = ErrJWKSUnavailable
+	}
+	return &SafeError{msg: "workos: jwks unavailable", cause: cause}
+}
+
 type rawAccessTokenClaims struct {
 	jwt.RegisteredClaims
 	OrgID        string   `json:"org_id,omitempty"`
@@ -89,6 +96,8 @@ func (c *Client) VerifyAccessToken(ctx context.Context, accessToken string) (*Ac
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrJWKSUnavailable):
+			return nil, jwksUnavailableError(err)
 		case errors.Is(err, errJWTUnexpectedAlg):
 			return nil, invalidTokenError("workos: unexpected jwt alg")
 		case errors.Is(err, errJWTMissingKID):

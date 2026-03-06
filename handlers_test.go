@@ -46,6 +46,16 @@ func addSessionCookie(t *testing.T, req *http.Request, cfg Config, sess *cookieS
 	req.AddCookie(mustFindCookie(t, w.Result().Cookies(), cfg.CookieName))
 }
 
+func assertAuthNoStoreHeaders(t *testing.T, resp *http.Response) {
+	t.Helper()
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want %q", got, "no-store")
+	}
+	if got := resp.Header.Get("Pragma"); got != "no-cache" {
+		t.Fatalf("Pragma = %q, want %q", got, "no-cache")
+	}
+}
+
 func TestSignInHandler(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		var captured usermanagement.GetAuthorizationURLOpts
@@ -64,6 +74,7 @@ func TestSignInHandler(t *testing.T) {
 		if resp.StatusCode != http.StatusTemporaryRedirect {
 			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
 		}
+		assertAuthNoStoreHeaders(t, resp)
 
 		stateCookie := mustFindCookie(t, resp.Cookies(), stateCookieName)
 		if stateCookie.Value == "" {
@@ -94,6 +105,7 @@ func TestSignInHandler(t *testing.T) {
 		if resp.StatusCode != http.StatusMethodNotAllowed {
 			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 		}
+		assertAuthNoStoreHeaders(t, resp)
 	})
 
 	t.Run("upstream failure", func(t *testing.T) {
@@ -111,6 +123,7 @@ func TestSignInHandler(t *testing.T) {
 		if resp.StatusCode != http.StatusInternalServerError {
 			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
 		}
+		assertAuthNoStoreHeaders(t, resp)
 	})
 }
 
@@ -131,6 +144,7 @@ func TestSignUpHandler(t *testing.T) {
 	if resp.StatusCode != http.StatusTemporaryRedirect {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
 	}
+	assertAuthNoStoreHeaders(t, resp)
 
 	stateCookie := mustFindCookie(t, resp.Cookies(), stateCookieName)
 	if stateCookie.Value == "" {
@@ -160,6 +174,7 @@ func TestCallbackHandler_ValidationAndSanitization(t *testing.T) {
 		if resp.StatusCode != http.StatusMethodNotAllowed {
 			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 		}
+		assertAuthNoStoreHeaders(t, resp)
 	})
 
 	t.Run("missing code", func(t *testing.T) {
@@ -172,6 +187,7 @@ func TestCallbackHandler_ValidationAndSanitization(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 		}
+		assertAuthNoStoreHeaders(t, resp)
 		body := w.Body.String()
 		if !strings.Contains(body, "Missing authorization code") {
 			t.Fatalf("body = %q", body)
@@ -188,6 +204,7 @@ func TestCallbackHandler_ValidationAndSanitization(t *testing.T) {
 		if resp.StatusCode != http.StatusForbidden {
 			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusForbidden)
 		}
+		assertAuthNoStoreHeaders(t, resp)
 	})
 
 	t.Run("generic error does not echo params", func(t *testing.T) {
@@ -199,6 +216,7 @@ func TestCallbackHandler_ValidationAndSanitization(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 		}
+		assertAuthNoStoreHeaders(t, resp)
 		body := w.Body.String()
 		if !strings.Contains(body, "Authentication error") {
 			t.Fatalf("body = %q", body)
@@ -208,6 +226,76 @@ func TestCallbackHandler_ValidationAndSanitization(t *testing.T) {
 		}
 		assertNoSecretLeak(t, body, "code_secret", "state_secret", "secret_description")
 	})
+}
+
+func TestCallbackHandler_RequiresRefreshToken(t *testing.T) {
+	key := mustRSAKey(t)
+	claims := baseClaims()
+	claims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(5 * time.Minute))
+	accessToken := signRS256Token(t, key, "kid-1", claims)
+
+	tests := []struct {
+		name         string
+		refreshToken string
+	}{
+		{name: "empty token", refreshToken: ""},
+		{name: "whitespace token", refreshToken: "   "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, ts := newJWTTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(jwkDoc{Keys: []jwkKey{rsaJWK(t, &key.PublicKey, "kid-1")}})
+			})
+			defer ts.Close()
+
+			client.um = &fakeUMClient{
+				authenticateWithCodeFunc: func(_ context.Context, _ usermanagement.AuthenticateWithCodeOpts) (usermanagement.AuthenticateResponse, error) {
+					return usermanagement.AuthenticateResponse{
+						User: common.User{
+							ID:        claims.Subject,
+							FirstName: "Alice",
+							LastName:  "Smith",
+							Email:     "alice@example.com",
+						},
+						OrganizationID:       "org_from_auth_resp",
+						AccessToken:          accessToken,
+						RefreshToken:         tt.refreshToken,
+						AuthenticationMethod: usermanagement.Password,
+					}, nil
+				},
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "http://example.test/auth/callback?code=code_123&state=state_123", nil)
+			req.AddCookie(&http.Cookie{Name: stateCookieName, Value: "state_123"})
+			w := httptest.NewRecorder()
+
+			client.CallbackHandler(w, req)
+			resp := w.Result()
+
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+			}
+			assertAuthNoStoreHeaders(t, resp)
+
+			body := w.Body.String()
+			if !strings.Contains(body, "Authentication failed") {
+				t.Fatalf("body = %q", body)
+			}
+			assertNoSecretLeak(t, body, "code_123", "state_123", accessToken, tt.refreshToken)
+
+			setCookies := resp.Header.Values("Set-Cookie")
+			joined := strings.Join(setCookies, "\n")
+			if !strings.Contains(joined, stateCookieName) || !strings.Contains(joined, "Max-Age=0") {
+				t.Fatalf("state clear cookie missing; Set-Cookie headers: %q", joined)
+			}
+			for _, c := range resp.Cookies() {
+				if c.Name == client.cfg.CookieName {
+					t.Fatalf("unexpected session cookie %q set", client.cfg.CookieName)
+				}
+			}
+		})
+	}
 }
 
 func TestCallbackHandler_SuccessAndRedirectRules(t *testing.T) {
@@ -272,6 +360,7 @@ func TestCallbackHandler_SuccessAndRedirectRules(t *testing.T) {
 			if resp.StatusCode != http.StatusTemporaryRedirect {
 				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
 			}
+			assertAuthNoStoreHeaders(t, resp)
 			if got := resp.Header.Get("Location"); got != tt.wantLoc {
 				t.Fatalf("Location = %q, want %q", got, tt.wantLoc)
 			}
@@ -294,6 +383,9 @@ func TestCallbackHandler_SuccessAndRedirectRules(t *testing.T) {
 			}
 			if sess == nil || sess.IdentityHint == nil {
 				t.Fatal("expected identity hint in cookie")
+			}
+			if sess.OrgID != "org_from_auth_resp" {
+				t.Fatalf("cookie OrgID = %q, want %q", sess.OrgID, "org_from_auth_resp")
 			}
 			if sess.IdentityHint.UserID != claims.Subject {
 				t.Fatalf("UserID = %q, want %q", sess.IdentityHint.UserID, claims.Subject)
@@ -320,9 +412,11 @@ func TestLogoutHandler(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "http://example.test/auth/logout", nil)
 		w := httptest.NewRecorder()
 		client.LogoutHandler(w, req)
-		if w.Result().StatusCode != http.StatusMethodNotAllowed {
-			t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusMethodNotAllowed)
+		resp := w.Result()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 		}
+		assertAuthNoStoreHeaders(t, resp)
 	})
 
 	t.Run("known session uses workos logout URL and revokes", func(t *testing.T) {
@@ -353,6 +447,7 @@ func TestLogoutHandler(t *testing.T) {
 		if resp.StatusCode != http.StatusSeeOther {
 			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 		}
+		assertAuthNoStoreHeaders(t, resp)
 		if got := resp.Header.Get("Location"); !strings.Contains(got, "session_id=sess_123") {
 			t.Fatalf("Location = %q", got)
 		}
@@ -364,9 +459,6 @@ func TestLogoutHandler(t *testing.T) {
 		}
 		if logoutOpts.ReturnTo != "https://app.example.com/auth/signed-out" {
 			t.Fatalf("logoutOpts.ReturnTo = %q, want %q", logoutOpts.ReturnTo, "https://app.example.com/auth/signed-out")
-		}
-		if got := resp.Header.Get("Cache-Control"); got != "no-store" {
-			t.Fatalf("Cache-Control = %q, want %q", got, "no-store")
 		}
 		if !strings.Contains(strings.Join(resp.Header.Values("Set-Cookie"), "\n"), client.cfg.CookieName) {
 			t.Fatalf("expected session clear cookie in Set-Cookie headers: %v", resp.Header.Values("Set-Cookie"))
@@ -394,6 +486,7 @@ func TestLogoutHandler(t *testing.T) {
 		if resp.StatusCode != http.StatusSeeOther {
 			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusSeeOther)
 		}
+		assertAuthNoStoreHeaders(t, resp)
 		if got := resp.Header.Get("Location"); got != "/auth/signed-out" {
 			t.Fatalf("Location = %q, want %q", got, "/auth/signed-out")
 		}
@@ -412,9 +505,7 @@ func TestSignedOutHandlers(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
 		}
-		if got := resp.Header.Get("Cache-Control"); got != "no-store" {
-			t.Fatalf("Cache-Control = %q, want %q", got, "no-store")
-		}
+		assertAuthNoStoreHeaders(t, resp)
 		if got := resp.Header.Get("Content-Type"); got != "text/html; charset=utf-8" {
 			t.Fatalf("Content-Type = %q", got)
 		}
@@ -431,9 +522,11 @@ func TestSignedOutHandlers(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "http://example.test/auth/signed-out", nil)
 		w := httptest.NewRecorder()
 		client.SignedOutHandler(w, req)
-		if w.Result().StatusCode != http.StatusMethodNotAllowed {
-			t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusMethodNotAllowed)
+		resp := w.Result()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 		}
+		assertAuthNoStoreHeaders(t, resp)
 	})
 
 	t.Run("signed out script", func(t *testing.T) {
@@ -445,9 +538,7 @@ func TestSignedOutHandlers(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
 		}
-		if got := resp.Header.Get("Cache-Control"); got != "no-store" {
-			t.Fatalf("Cache-Control = %q, want %q", got, "no-store")
-		}
+		assertAuthNoStoreHeaders(t, resp)
 		if got := resp.Header.Get("Content-Type"); got != "application/javascript; charset=utf-8" {
 			t.Fatalf("Content-Type = %q", got)
 		}
@@ -461,9 +552,11 @@ func TestSignedOutHandlers(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "http://example.test/auth/signed-out.js", nil)
 		w := httptest.NewRecorder()
 		client.SignedOutScriptHandler(w, req)
-		if w.Result().StatusCode != http.StatusMethodNotAllowed {
-			t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusMethodNotAllowed)
+		resp := w.Result()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 		}
+		assertAuthNoStoreHeaders(t, resp)
 	})
 }
 
@@ -499,6 +592,7 @@ func TestRegisterAuthHandlers(t *testing.T) {
 		if w.Result().StatusCode != http.StatusSeeOther {
 			t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusSeeOther)
 		}
+		assertAuthNoStoreHeaders(t, w.Result())
 	})
 
 	t.Run("nil csrf middleware panics", func(t *testing.T) {
@@ -532,9 +626,7 @@ func TestRegisterAuthHandlers(t *testing.T) {
 			if w.Result().StatusCode != http.StatusOK {
 				t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusOK)
 			}
-			if got := w.Result().Header.Get("Cache-Control"); got != "no-store" {
-				t.Fatalf("Cache-Control = %q, want %q", got, "no-store")
-			}
+			assertAuthNoStoreHeaders(t, w.Result())
 			if got := w.Result().Header.Get("Content-Type"); got != "text/html; charset=utf-8" {
 				t.Fatalf("Content-Type = %q, want %q", got, "text/html; charset=utf-8")
 			}
@@ -551,6 +643,7 @@ func TestRegisterAuthHandlers(t *testing.T) {
 			if w.Result().StatusCode != http.StatusOK {
 				t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusOK)
 			}
+			assertAuthNoStoreHeaders(t, w.Result())
 		})
 
 		t.Run("fixed script path", func(t *testing.T) {
@@ -561,6 +654,7 @@ func TestRegisterAuthHandlers(t *testing.T) {
 			if w.Result().StatusCode != http.StatusOK {
 				t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusOK)
 			}
+			assertAuthNoStoreHeaders(t, w.Result())
 			if got := w.Result().Header.Get("Content-Type"); got != "application/javascript; charset=utf-8" {
 				t.Fatalf("Content-Type = %q, want %q", got, "application/javascript; charset=utf-8")
 			}
@@ -579,5 +673,6 @@ func TestRegisterAuthHandlers(t *testing.T) {
 		if w.Result().StatusCode != http.StatusOK {
 			t.Fatalf("StatusCode = %d, want %d", w.Result().StatusCode, http.StatusOK)
 		}
+		assertAuthNoStoreHeaders(t, w.Result())
 	})
 }

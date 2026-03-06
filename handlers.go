@@ -12,6 +12,11 @@ import (
 	"github.com/workos/workos-go/v6/pkg/usermanagement"
 )
 
+func setAuthNoStoreHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+}
+
 func generateState() string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -21,6 +26,8 @@ func generateState() string {
 }
 
 func (c *Client) SignInHandler(w http.ResponseWriter, r *http.Request) {
+	setAuthNoStoreHeaders(w)
+
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -48,6 +55,8 @@ func (c *Client) SignInHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Client) SignUpHandler(w http.ResponseWriter, r *http.Request) {
+	setAuthNoStoreHeaders(w)
+
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -76,6 +85,8 @@ func (c *Client) SignUpHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
+	setAuthNoStoreHeaders(w)
+
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -107,6 +118,11 @@ func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Authentication failed", http.StatusUnauthorized)
 		return
 	}
+	// Refresh token is required because middleware uses it to rotate expired access tokens.
+	if strings.TrimSpace(authResp.RefreshToken) == "" {
+		http.Error(w, "Authentication failed", http.StatusUnauthorized)
+		return
+	}
 	claims, err := c.VerifyAccessToken(r.Context(), authResp.AccessToken)
 	if err != nil {
 		http.Error(w, "Authentication failed", http.StatusUnauthorized)
@@ -135,6 +151,7 @@ func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	if err := setSessionCookie(w, &cookieSession{
 		AccessToken:  authResp.AccessToken,
 		RefreshToken: authResp.RefreshToken,
+		OrgID:        identity.OrgID,
 		IdentityHint: identity,
 	}, c.cfg); err != nil {
 		http.Error(w, "Failed to create session", http.StatusInternalServerError)
@@ -167,6 +184,8 @@ func isSafeRedirect(returnTo, baseURL string) bool {
 }
 
 func (c *Client) LogoutHandler(w http.ResponseWriter, r *http.Request) {
+	setAuthNoStoreHeaders(w)
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -174,7 +193,6 @@ func (c *Client) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 
 	cookieSess, _ := readSessionCookie(r, c.cfg)
 	clearSessionCookie(w, c.cfg)
-	w.Header().Set("Cache-Control", "no-store")
 
 	sessionID := ""
 	if cookieSess != nil && cookieSess.IdentityHint != nil && cookieSess.IdentityHint.SessionID != "" {
@@ -202,6 +220,8 @@ func (c *Client) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Client) SignedOutHandler(w http.ResponseWriter, r *http.Request) {
+	setAuthNoStoreHeaders(w)
+
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -212,7 +232,6 @@ func (c *Client) SignedOutHandler(w http.ResponseWriter, r *http.Request) {
 		returnTo = "/"
 	}
 
-	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(signedOutHTML(returnTo)))
@@ -237,12 +256,13 @@ func signedOutHTML(returnTo string) string {
 }
 
 func (c *Client) SignedOutScriptHandler(w http.ResponseWriter, r *http.Request) {
+	setAuthNoStoreHeaders(w)
+
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(signedOutJS))

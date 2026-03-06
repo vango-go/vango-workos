@@ -7,6 +7,7 @@ Key idea: WorkOS is HTTP request/response, while Vango sessions are long-lived (
 ## What You Get
 
 - AuthKit routes: `/auth/signin`, `/auth/signup`, `/auth/callback`, `/auth/logout` (POST), `/auth/signed-out`, `/auth/signed-out.js`
+  - all auth entry/callback/logout responses send `Cache-Control: no-store` and `Pragma: no-cache`
 - Encrypted cookie sessions (AES-256-GCM, HttpOnly), with optional secret fallbacks for rotation
 - HTTP-boundary middleware that:
   - reads/decrypts the session cookie
@@ -177,6 +178,7 @@ func splitCSV(v string) []string {
 
 - `GET /auth/signin`: generates an AuthKit authorization URL, sets a short-lived state cookie, redirects to WorkOS.
 - `GET /auth/signup`: same, but sets `screen_hint=sign_up`.
+- both responses are explicitly non-cacheable (`Cache-Control: no-store`, `Pragma: no-cache`) so auth redirects and state-bearing responses are not cached by browsers or intermediaries.
 
 ### Callback
 
@@ -184,8 +186,9 @@ func splitCSV(v string) []string {
   - validates the `state` against the state cookie (CSRF protection)
   - exchanges `code` for `AccessToken`, `RefreshToken`, and user info via WorkOS User Management
   - verifies the access token locally (JWKS + issuer + audience)
-  - stores tokens (and an identity hint) in an encrypted cookie
+  - stores tokens, an authoritative `org_id` binding (when available), and an identity hint (UX-only) in an encrypted cookie
   - redirects to `return_to` if safe, otherwise `/`
+  - every response path is explicitly non-cacheable (`Cache-Control: no-store`, `Pragma: no-cache`), including validation failures and successful cookie-setting redirects
 
 Safe redirect rules for `return_to`:
 
@@ -200,9 +203,13 @@ Safe redirect rules for `return_to`:
 2. Verifies the access token locally using cached JWKS.
 3. If the token is expired:
    - refreshes tokens (unless `DisableRefreshInMiddleware=true`), then re-verifies
-4. Creates a `*workos.Identity` from the JWT claims (and fills missing fields from the identity hint).
-5. Writes the updated cookie when needed (refresh occurred or hint was missing).
-6. Attaches identity to the HTTP request context (`vango.WithUser`).
+4. Creates a `*workos.Identity` from the JWT claims (and may fill missing `Email`/`Name` from the identity hint for UX).
+5. Derives `Identity.OrgID` / `Principal.TenantID` authoritatively:
+   - prefer JWT `org_id` claim when present
+   - otherwise use the cookie’s `org_id` binding (written only from WorkOS responses)
+   - if both are missing, performs a bounded `ValidateSession` lookup and upgrades the cookie
+6. Writes the updated cookie when needed (refresh occurred, org binding upgraded, or hint was missing).
+7. Attaches identity to the HTTP request context (`vango.WithUser`).
 
 Important behavior:
 
@@ -324,8 +331,21 @@ Notes:
 
 - runs every `RevalidationInterval` (default: 5m)
 - validates the WorkOS session is still active via `ValidateSession` (a network call)
-- uses `FailureMode: vango.FailOpenWithGrace` with `MaxStaleSession` (default: 15m)
+- uses `FailureMode: RevalidationFailureMode` (default: `vango.FailOpenWithGrace`) with `MaxStaleSession` (default: 15m)
 - when session is expired, forces reload and sends the user to `/auth/signin`
+
+Security/availability tradeoffs:
+
+- `vango.FailOpenWithGrace` (default): keeps sessions alive during transient WorkOS/API outages, but a revoked WorkOS session may remain usable until the next successful revalidation or until `MaxStaleSession` elapses.
+- `vango.FailClosed` (strict): expires sessions immediately on any revalidation failure (more secure, but can force logouts during WorkOS/API outages).
+
+To opt into strict mode:
+
+```go
+RevalidationFailureMode: vango.FailClosed,
+```
+
+Regardless of periodic settings, high-value operations should call `ctx.RevalidateAuth()` immediately before sensitive mutations. `ctx.RevalidateAuth()` is fail-closed: it requires a successful active check and returns an error on any failure.
 
 If you do not want periodic checks, set:
 
@@ -347,17 +367,38 @@ mux.Handle("/webhooks/workos", client.WebhookHandler(
 ))
 ```
 
+For mutating webhook consumers, prefer the retry-aware entrypoint:
+
+```go
+store := workos.NewMemoryWebhookIdempotencyStore() // single-process only
+
+mux.Handle("/webhooks/workos", client.WebhookHandlerWithOptions(
+	workos.WebhookHandlerOptions{
+		IdempotencyStore: store,
+	},
+	workos.OnUserCreatedErr(func(ctx context.Context, e workos.WebhookEvent) error {
+		// enqueue durable work or commit your transaction here
+		return nil
+	}),
+))
+```
+
 Requirements:
 
 - `WebhookSecret` must be set, otherwise the handler returns `500`.
 - Requests must be `POST`.
 - The handler enforces `WebhookMaxBodyBytes` (default: 1 MiB).
 - Signature verification uses the `WorkOS-Signature` header.
+- WorkOS delivery is at-least-once. If you mutate state, use `WebhookHandlerWithOptions(...)` and key idempotency by `WebhookEvent.ID`.
+- Error-capable handlers (`OnUserCreatedErr`, `OnAnyEventErr`, etc.) intentionally return non-2xx on failure so WorkOS retries delivery.
+- Subscriber panics are recovered by `vango-workos`; dispatch stops and the endpoint returns `500` instead of relying on a global panic middleware to keep the process alive.
+- `NewMemoryWebhookIdempotencyStore()` is suitable only for tests, local development, and single-instance deployments. Use a shared backend for multi-instance deployments.
 
 ### Handling webhook payloads
 
 `workos.WebhookEvent` provides:
 
+- `ID` string (delivery idempotency key)
 - `Event` string (e.g. `dsync.user.created`)
 - `Data` as `json.RawMessage`
 
@@ -377,6 +418,17 @@ func handleUserCreated(ctx context.Context, e workos.WebhookEvent) {
 	// Perform your side effects here (db writes, enqueue jobs, etc.).
 }
 ```
+
+Recommended delivery contract:
+
+- treat `WebhookEvent.ID` as the idempotency key
+- keep handlers fast; enqueue durable work rather than doing slow side effects inline
+- return an error only when you want WorkOS to retry the delivery
+- if a subscriber panics, `vango-workos` recovers it, aborts the delivery, and returns `500`; global server panic recovery is still useful generally, but webhook safety does not depend on it
+- distributed-store contract:
+  - `Claim(key, leaseTTL)` acquires an in-flight lease only when the key is absent or expired
+  - `MarkProcessed(key, token, ttl)` atomically converts the matching in-flight lease into a processed marker
+  - `Release(key, token)` deletes only the matching in-flight lease so stale workers cannot clear a newer claim
 
 ## Admin Portal Links
 
@@ -464,6 +516,7 @@ err := client.EmitAuditEvent(ctx, workos.AuditEvent{
 - best-effort revokes the WorkOS session via `RevokeSession`
 - redirects through WorkOS logout when it has a session ID
 - lands on `/auth/signed-out`, which broadcasts “logout” to other tabs and clears Vango resume keys, then redirects to `return_to` (safe-redirect rules apply)
+- logout, signed-out HTML, and signed-out script responses are also explicitly non-cacheable for the same reason
 
 ### Rendering a logout button
 

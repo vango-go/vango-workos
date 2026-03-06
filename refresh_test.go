@@ -2,6 +2,7 @@ package workos
 
 import (
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -156,6 +157,12 @@ func TestRefreshTokens_FailurePathsAreSanitized(t *testing.T) {
 					}, nil
 				},
 			},
+			// Serve a warm (possibly empty) JWKS cache so this test exercises
+			// invalid-token classification instead of JWKS fetch unavailability.
+			jwksCache: &jwksCache{
+				fetchedAt: time.Now(),
+				keys:      map[string]*rsa.PublicKey{},
+			},
 		}
 
 		_, err := client.RefreshTokens(context.Background(), "refresh_abc")
@@ -166,5 +173,51 @@ func TestRefreshTokens_FailurePathsAreSanitized(t *testing.T) {
 			t.Fatalf("error = %q", err.Error())
 		}
 		assertNoSecretLeak(t, err.Error())
+	})
+
+	t.Run("jwks unavailable during refreshed token verification", func(t *testing.T) {
+		keyA := mustRSAKey(t)
+		keyB := mustRSAKey(t)
+		claims := baseClaims()
+		claims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(10 * time.Minute))
+		refreshedToken := signRS256Token(t, keyB, "kid-b", claims)
+
+		client, err := New(validConfig())
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		client.cfg.JWKSURL = "http://127.0.0.1:1/unreachable"
+		client.cfg.JWKSFetchTimeout = 10 * time.Millisecond
+		client.cfg.JWTAudience = "client_test_audience"
+		client.jwksHTTPClient.Timeout = client.cfg.JWKSFetchTimeout
+		client.jwksCache = &jwksCache{
+			fetchedAt: time.Now(),
+			keys: map[string]*rsa.PublicKey{
+				"kid-a": &keyA.PublicKey,
+			},
+		}
+		client.um = &fakeUMClient{
+			authenticateWithRefreshTokenFunc: func(context.Context, usermanagement.AuthenticateWithRefreshTokenOpts) (usermanagement.RefreshAuthenticationResponse, error) {
+				return usermanagement.RefreshAuthenticationResponse{
+					AccessToken:  refreshedToken,
+					RefreshToken: "refresh_next",
+				}, nil
+			},
+		}
+
+		_, err = client.RefreshTokens(context.Background(), "refresh_abc")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !errors.Is(err, ErrJWKSUnavailable) {
+			t.Fatalf("expected ErrJWKSUnavailable, got err=%v", err)
+		}
+		if errors.Is(err, ErrAccessTokenInvalid) {
+			t.Fatalf("expected error to not be ErrAccessTokenInvalid, got err=%v", err)
+		}
+		if err.Error() != "workos: jwks unavailable" {
+			t.Fatalf("error = %q, want %q", err.Error(), "workos: jwks unavailable")
+		}
+		assertNoSecretLeak(t, err.Error(), refreshedToken)
 	})
 }

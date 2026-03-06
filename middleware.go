@@ -1,6 +1,7 @@
 package workos
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -44,6 +45,10 @@ func (c *Client) Middleware() func(http.Handler) http.Handler {
 					}
 					refreshed, err := c.RefreshTokens(r.Context(), refreshToken)
 					if err != nil {
+						if errors.Is(err, ErrJWKSUnavailable) {
+							next.ServeHTTP(w, r)
+							return
+						}
 						clearSessionCookie(w, c.cfg)
 						next.ServeHTTP(w, r)
 						return
@@ -78,6 +83,10 @@ func (c *Client) Middleware() func(http.Handler) http.Handler {
 
 				refreshed, err := c.RefreshTokens(r.Context(), refreshToken)
 				if err != nil {
+					if errors.Is(err, ErrJWKSUnavailable) {
+						next.ServeHTTP(w, r)
+						return
+					}
 					clearSessionCookie(w, c.cfg)
 					next.ServeHTTP(w, r)
 					return
@@ -88,6 +97,10 @@ func (c *Client) Middleware() func(http.Handler) http.Handler {
 
 				claims, err = c.VerifyAccessToken(r.Context(), accessToken)
 				if err != nil {
+					if errors.Is(err, ErrJWKSUnavailable) {
+						next.ServeHTTP(w, r)
+						return
+					}
 					clearSessionCookie(w, c.cfg)
 					next.ServeHTTP(w, r)
 					return
@@ -112,14 +125,48 @@ func (c *Client) Middleware() func(http.Handler) http.Handler {
 			if identity.Name == "" && hint != nil {
 				identity.Name = hint.Name
 			}
-			if identity.OrgID == "" && hint != nil {
-				identity.OrgID = hint.OrgID
+
+			// Derive tenant org authoritatively. Never use IdentityHint.OrgID for tenancy.
+			//
+			// Source chain:
+			//  1) access token claim org_id (claims.OrgID)
+			//  2) cookieSess.OrgID (written only from WorkOS callback/session validation)
+			//  3) ValidateSession (WorkOS API) when (1) and (2) are empty
+			if claims.OrgID != "" {
+				if cookieSess.OrgID != "" && cookieSess.OrgID != claims.OrgID {
+					clearSessionCookie(w, c.cfg)
+					next.ServeHTTP(w, r)
+					return
+				}
+				if cookieSess.OrgID != claims.OrgID {
+					cookieSess.OrgID = claims.OrgID
+					needCookieWrite = true
+				}
+				identity.OrgID = claims.OrgID
+			} else if cookieSess.OrgID != "" {
+				identity.OrgID = cookieSess.OrgID
+			} else {
+				ctx, cancel := context.WithTimeout(r.Context(), c.cfg.RevalidationTimeout)
+				info, err := c.ValidateSession(ctx, claims.UserID, claims.SessionID)
+				cancel()
+				if err != nil {
+					// Fail open: proceed without tenant org rather than trusting a hint.
+				} else if info == nil || !info.Active {
+					clearSessionCookie(w, c.cfg)
+					next.ServeHTTP(w, r)
+					return
+				} else if info.OrgID != "" {
+					identity.OrgID = info.OrgID
+					cookieSess.OrgID = info.OrgID
+					needCookieWrite = true
+				}
 			}
 
 			if needCookieWrite || cookieSess.IdentityHint == nil {
 				if err := setSessionCookie(w, &cookieSession{
 					AccessToken:  accessToken,
 					RefreshToken: refreshToken,
+					OrgID:        cookieSess.OrgID,
 					IdentityHint: identity,
 				}, c.cfg); err != nil {
 					clearSessionCookie(w, c.cfg)

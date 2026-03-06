@@ -36,6 +36,32 @@ func Example_standardVangoWiring() {
 	))
 }
 
+func Example_strictWebhookWiring() {
+	cfg := Config{
+		APIKey:        "sk_test_abcdefghijklmnopqrstuvwxyz123456",
+		ClientID:      "client_1234567890",
+		RedirectURI:   "https://app.example.com/auth/callback",
+		CookieSecret:  "0123456789abcdef0123456789abcdef",
+		BaseURL:       "https://app.example.com",
+		WebhookSecret: "whsec_test_example",
+	}
+
+	client, err := New(cfg)
+	if err != nil {
+		return
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/webhooks/workos", client.WebhookHandlerWithOptions(
+		WebhookHandlerOptions{
+			IdempotencyStore: NewMemoryWebhookIdempotencyStore(),
+		},
+		OnUserCreatedErr(func(ctx context.Context, e WebhookEvent) error {
+			return nil
+		}),
+	))
+}
+
 func ExampleCurrentIdentity_componentUsage() {
 	ctx := &ctxStub{
 		user: TestIdentity(

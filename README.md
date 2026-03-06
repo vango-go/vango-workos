@@ -78,6 +78,17 @@ app.Server().SetHandler(mux)
 - Session list cache is bounded by `SessionListCacheMaxUsers` (default `10000`).
 - In multi-instance deployments without sticky sessions, consider `DisableRefreshInMiddleware=true` to avoid refresh races across instances.
 - Resume revalidation still runs via `OnSessionResume`, and periodic checks are controlled by `RevalidationConfig()`.
+- WorkOS webhook delivery is at-least-once; use `WebhookHandlerWithOptions(...)` plus a `WebhookIdempotencyStore` for mutating webhook consumers.
+
+## Webhook delivery reliability
+
+- `WebhookHandler(...)` remains the compatibility entrypoint for success-only handlers.
+- `WebhookHandlerWithOptions(...)` adds:
+  - error-capable handlers (`OnUserCreatedErr`, `OnAnyEventErr`, etc.) that return non-2xx on processing failure so WorkOS retries delivery
+  - optional de-duplication by `WebhookEvent.ID` via `WebhookIdempotencyStore`
+- subscriber callbacks are panic-safe: the package recovers panics, stops dispatch, and returns `500` so a broken handler does not crash the process
+- `NewMemoryWebhookIdempotencyStore()` is single-process only. For multi-instance deployments, provide a shared store implementation (for example Redis or SQL-backed).
+- Recommended pattern: verify signature, enqueue durable work, and return success only after the enqueue/transaction commits.
 
 ## Test kit
 
@@ -87,14 +98,14 @@ The package includes deterministic test helpers in the root package:
 - `TestIdentity(...)` with override helpers (`WithUserID`, `WithEmail`, `WithOrgID`, `WithRoles`, `WithPermissions`, `WithEntitlements`)
 - `HydrateSessionForTest(session, identity)` to populate runtime auth projection in unit tests
 
-Webhook handlers can be tested directly with subscription builders such as `OnDirectoryUserCreated`.
+Webhook handlers can be tested directly with legacy or error-capable subscription builders such as `OnDirectoryUserCreated` and `OnDirectoryUserCreatedErr`.
 
 ## Security summary
 
 - Access/refresh tokens are stored only in encrypted HttpOnly cookie payloads.
 - Session cookie encryption uses AES-256-GCM and binds ciphertext to the configured cookie name.
 - Redirect handling blocks open redirects.
-- Webhook payloads are signature-verified before dispatch.
+- Webhook payloads are signature-verified before dispatch, subscriber panics are recovered inside the webhook package, and retry-aware handlers can return non-2xx to trigger WorkOS redelivery.
 - Sensitive helper errors are safe to log by default.
 
 ## Status

@@ -155,9 +155,13 @@ type Auth interface {
 All types are Vango-native structs that normalize WorkOS SDK types into a stable, minimal surface. This insulates application code from SDK version churn and simplifies testing.
 
 ```go
-package workos
+	package workos
 
-import "time"
+	import (
+		"time"
+
+		"github.com/vango-go/vango"
+	)
 
 // --- Identity Types ---
 
@@ -656,6 +660,15 @@ type Config struct {
 	// Default: 5 seconds.
 	RevalidationTimeout time.Duration
 
+	// RevalidationFailureMode controls how periodic WorkOS session validation behaves
+	// when the WorkOS API is unavailable or validation fails for transient reasons.
+	//
+	// Allowed:
+	// - vango.FailOpenWithGrace (default): tolerate transient failures; session remains
+	//   active until MaxStaleSession elapses without a successful validation.
+	// - vango.FailClosed: expire immediately on any validation failure (strict posture).
+	RevalidationFailureMode vango.AuthFailureMode
+
 	// MaxStaleSession is how long a session can remain active without
 	// a successful revalidation before forced logout.
 	// Default: 15 minutes.
@@ -721,9 +734,12 @@ type Config struct {
 The WorkOS integration uses an **encrypted, HttpOnly session cookie** to store:
 - the current **access token** (JWT),
 - the current **refresh token** (rotating; sensitive),
-- an optional cached **identity hint** used for UX (non-authoritative; may be stale).
+- an optional cached **organization binding** (`org_id`) used for tenancy when the JWT omits it (authoritative only because it is written exclusively from WorkOS responses),
+- an optional cached **identity hint** used for UX only (non-authoritative; may be stale).
 
 **Authoritative identity** comes from verifying the access token locally (JWKS + claims). Any cached identity data in the cookie exists only to avoid extra API calls and MUST be treated as a hint.
+
+**Tenant safety rule (MUST):** `IdentityHint.OrgID` MUST NOT be used to set `Identity.OrgID` / `auth.Principal.TenantID`. Tenant org must come from the JWT `org_id` claim, a WorkOS response at callback time, or a WorkOS session validation lookup.
 
 **Cookie payload (v1):**
 
@@ -735,6 +751,10 @@ type cookieSession struct {
 	IssuedAtUnix int64     `json:"iat_unix_ms"`
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
+	// OrgID is an authoritative organization binding for tenancy when the access token
+	// does not include an org_id claim. It MUST only be populated from WorkOS responses
+	// (callback OrganizationID / ValidateSession), never from IdentityHint.
+	OrgID        string    `json:"org_id,omitempty"`
 	IdentityHint *Identity `json:"identity_hint,omitempty"`
 }
 ```
@@ -1756,6 +1776,11 @@ These handlers implement the AuthKit hosted UI flow for Vango applications. They
 		"time"
 	)
 
+	func setAuthNoStoreHeaders(w http.ResponseWriter) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+	}
+
 	// generateState returns an opaque random string for the OAuth/AuthKit "state" parameter.
 	// It is stored in a short-lived HttpOnly cookie and verified on callback.
 	func generateState() string {
@@ -1768,10 +1793,12 @@ These handlers implement the AuthKit hosted UI flow for Vango applications. They
 
 // SignInHandler redirects the user to the AuthKit hosted sign-in page.
 // It generates a state parameter for CSRF protection.
+// All responses are explicitly non-cacheable to avoid caching auth redirects.
 //
 // Registration:
 //   mux.HandleFunc("GET /auth/signin", client.SignInHandler)
 func (c *Client) SignInHandler(w http.ResponseWriter, r *http.Request) {
+	setAuthNoStoreHeaders(w)
 	state := generateState()
 	setStateCookie(w, state, c.cfg)
 
@@ -1790,10 +1817,12 @@ func (c *Client) SignInHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // SignUpHandler redirects the user to the AuthKit hosted sign-up page.
+// All responses are explicitly non-cacheable to avoid caching auth redirects.
 //
 // Registration:
 //   mux.HandleFunc("GET /auth/signup", client.SignUpHandler)
 func (c *Client) SignUpHandler(w http.ResponseWriter, r *http.Request) {
+	setAuthNoStoreHeaders(w)
 	state := generateState()
 	setStateCookie(w, state, c.cfg)
 
@@ -1817,6 +1846,8 @@ func (c *Client) SignUpHandler(w http.ResponseWriter, r *http.Request) {
 // CallbackHandler handles the OAuth/AuthKit callback from WorkOS.
 // It exchanges the authorization code for tokens, creates a session
 // cookie, and redirects the user to the application.
+// All responses are explicitly non-cacheable to avoid caching callback URLs
+// carrying `code`, `state`, or freshly issued cookies.
 //
 // This handler MUST be registered at the path matching your configured
 // redirect URI in the WorkOS Dashboard.
@@ -1824,6 +1855,7 @@ func (c *Client) SignUpHandler(w http.ResponseWriter, r *http.Request) {
 // Registration:
 //   mux.HandleFunc("GET /auth/callback", client.CallbackHandler)
 func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
+	setAuthNoStoreHeaders(w)
 	code := r.URL.Query().Get("code")
 	state := r.URL.Query().Get("state")
 	errParam := r.URL.Query().Get("error")
@@ -1887,15 +1919,23 @@ func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		identity.OrgID = authResp.OrganizationID
 	}
 
-	// Encrypt and set session cookie
-	if err := setSessionCookie(w, &cookieSession{
-		AccessToken:  authResp.AccessToken,
-		RefreshToken: authResp.RefreshToken,
-		IdentityHint: identity,
-	}, c.cfg); err != nil {
-		http.Error(w, "Failed to create session", http.StatusInternalServerError)
+	// Refresh token is REQUIRED for session issuance.
+	// If empty, reject the callback and do not create a session cookie.
+	if strings.TrimSpace(authResp.RefreshToken) == "" {
+		http.Error(w, "Authentication failed", http.StatusUnauthorized)
 		return
 	}
+
+		// Encrypt and set session cookie
+		if err := setSessionCookie(w, &cookieSession{
+			AccessToken:  authResp.AccessToken,
+			RefreshToken: authResp.RefreshToken,
+			OrgID:        identity.OrgID,
+			IdentityHint: identity,
+		}, c.cfg); err != nil {
+			http.Error(w, "Failed to create session", http.StatusInternalServerError)
+			return
+		}
 
 	// Redirect to the application.
 	// Use the return_to parameter if present, otherwise root.
@@ -1944,6 +1984,7 @@ func isSafeRedirect(returnTo, baseURL string) bool {
 	//   mux.HandleFunc("GET /auth/signed-out", client.SignedOutHandler)
 	//   mux.HandleFunc("GET /auth/signed-out.js", client.SignedOutScriptHandler)
 	func (c *Client) LogoutHandler(w http.ResponseWriter, r *http.Request) {
+		setAuthNoStoreHeaders(w)
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -1953,7 +1994,6 @@ func isSafeRedirect(returnTo, baseURL string) bool {
 
 			// Always clear local cookie (forces re-auth on next request).
 			clearSessionCookie(w, c.cfg)
-			w.Header().Set("Cache-Control", "no-store")
 
 			// Where WorkOS should send the browser after logout.
 			// This MUST be allowed in the WorkOS Dashboard sign-out redirects list.
@@ -1995,6 +2035,7 @@ func isSafeRedirect(returnTo, baseURL string) bool {
 	// This MUST be registered at the same path as Config.SignOutRedirectURI,
 	// and that redirect MUST be configured in the WorkOS Dashboard.
 	func (c *Client) SignedOutHandler(w http.ResponseWriter, r *http.Request) {
+		setAuthNoStoreHeaders(w)
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -2005,7 +2046,6 @@ func isSafeRedirect(returnTo, baseURL string) bool {
 			returnTo = "/"
 		}
 
-		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(signedOutHTML(returnTo)))
@@ -2032,7 +2072,7 @@ func isSafeRedirect(returnTo, baseURL string) bool {
 	//  2) clearing Vango resume keys,
 	//  3) navigation to the return_to destination.
 	func (c *Client) SignedOutScriptHandler(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
+		setAuthNoStoreHeaders(w)
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(signedOutJS))
@@ -2100,11 +2140,12 @@ This integration MUST use Vango’s existing auth projection keys in `github.com
 
 It MUST NOT store access/refresh tokens in session KV. Tokens only live inside the encrypted cookie payload.
 
-**Auth freshness posture (normative):**
-- Authorization inside an established WebSocket session MUST be based on the projected `Identity` / `auth.Principal`, not on access token freshness.
-- Access token expiry is enforced at the HTTP boundary (middleware refresh or forced re-auth).
-- WorkOS session revocation is enforced via resume checks (OnSessionResume) and optionally via periodic `AuthCheck` (RevalidationConfig).
-- High-value operations SHOULD call `ctx.RevalidateAuth()` immediately before performing sensitive mutations.
+	**Auth freshness posture (normative):**
+	- Authorization inside an established WebSocket session MUST be based on the projected `Identity` / `auth.Principal`, not on access token freshness.
+	- Access token expiry is enforced at the HTTP boundary (middleware refresh or forced re-auth).
+	- WorkOS session revocation is enforced via resume checks (OnSessionResume) and optionally via periodic `AuthCheck` (RevalidationConfig).
+	- High-value operations SHOULD call `ctx.RevalidateAuth()` immediately before performing sensitive mutations.
+	  - `ctx.RevalidateAuth()` is a **fail-closed** on-demand check: it requires a successful active validation and returns an error on any failure, even when periodic `AuthCheck` is configured to fail-open with grace.
 
 **Wiring (canonical):**
 - Install HTTP-boundary middleware via `app.Server().Use(workosClient.Middleware())` so it runs on SSR *and* WebSocket upgrade/resume requests.
@@ -2193,39 +2234,73 @@ func (c *Client) Middleware() func(http.Handler) http.Handler {
 					}
 				}
 
-					// Build a fresh identity projection for Vango.
-					// Claims are authoritative; cookieSess.IdentityHint is a UX hint only.
-					hint := cookieSess.IdentityHint
-					identity := &Identity{
-							UserID:      claims.UserID,
-							Email:       claims.Email,
-							Name:        claims.Name,
-							OrgID:       claims.OrgID,
-						Roles:       claims.Roles,
-						Permissions: claims.Permissions,
-						Entitlements: claims.Entitlements,
-						SessionID:   claims.SessionID,
-							ExpiresAt:   claims.ExpiresAt,
+						// Build a fresh identity projection for Vango.
+						// Claims are authoritative; cookieSess.IdentityHint is a UX hint only.
+						hint := cookieSess.IdentityHint
+						identity := &Identity{
+								UserID:       claims.UserID,
+								Email:        claims.Email,
+								Name:         claims.Name,
+								OrgID:        claims.OrgID,
+							Roles:        claims.Roles,
+							Permissions:  claims.Permissions,
+							Entitlements: claims.Entitlements,
+							SessionID:    claims.SessionID,
+								ExpiresAt:    claims.ExpiresAt,
+							}
+						if identity.Email == "" && hint != nil {
+							identity.Email = hint.Email
 						}
-					if identity.Email == "" && hint != nil {
-						identity.Email = hint.Email
-					}
-					if identity.Name == "" && hint != nil {
-						identity.Name = hint.Name
-					}
-					if identity.OrgID == "" && hint != nil {
-						identity.OrgID = hint.OrgID
-					}
+						if identity.Name == "" && hint != nil {
+							identity.Name = hint.Name
+						}
 
-				// Persist rotated tokens (and optionally refreshed identity projection) to cookie.
-				// Avoid writing on every request; only write when rotation occurred or identity is missing.
-				if needCookieWrite || cookieSess.IdentityHint == nil {
-					_ = setSessionCookie(w, &cookieSession{
-						AccessToken:  accessToken,
-						RefreshToken: refreshToken,
-						IdentityHint: identity,
-					}, c.cfg)
-				}
+						// Tenant org derivation (MUST):
+						// - NEVER use hint.OrgID for tenancy.
+						// - Prefer claims.OrgID when present.
+						// - Otherwise, use cookieSess.OrgID (written only from WorkOS responses).
+						// - If both are empty, perform a bounded ValidateSession lookup and upgrade the cookie.
+						if claims.OrgID != "" {
+							if cookieSess.OrgID != "" && cookieSess.OrgID != claims.OrgID {
+								clearSessionCookie(w, c.cfg)
+								next.ServeHTTP(w, r)
+								return
+							}
+							if cookieSess.OrgID != claims.OrgID {
+								cookieSess.OrgID = claims.OrgID
+								needCookieWrite = true
+							}
+							identity.OrgID = claims.OrgID
+						} else if cookieSess.OrgID != "" {
+							identity.OrgID = cookieSess.OrgID
+						} else {
+							ctx, cancel := context.WithTimeout(r.Context(), c.cfg.RevalidationTimeout)
+							info, err := c.ValidateSession(ctx, claims.UserID, claims.SessionID)
+							cancel()
+							if err == nil {
+								if info == nil || !info.Active {
+									clearSessionCookie(w, c.cfg)
+									next.ServeHTTP(w, r)
+									return
+								}
+								if info.OrgID != "" {
+									identity.OrgID = info.OrgID
+									cookieSess.OrgID = info.OrgID
+									needCookieWrite = true
+								}
+							}
+						}
+
+					// Persist rotated tokens (and optionally refreshed identity projection) to cookie.
+					// Avoid writing on every request; only write when rotation occurred or identity is missing.
+					if needCookieWrite || cookieSess.IdentityHint == nil {
+						_ = setSessionCookie(w, &cookieSession{
+							AccessToken:  accessToken,
+							RefreshToken: refreshToken,
+							OrgID:        cookieSess.OrgID,
+							IdentityHint: identity,
+						}, c.cfg)
+					}
 
 					// Attach Identity for SSR and for handshake hooks.
 					ctx := vango.WithUser(r.Context(), identity)
@@ -2353,12 +2428,12 @@ func (c *Client) RevalidationConfig() *vango.AuthCheckConfig {
 	if c.cfg.DisablePeriodicSessionValidation {
 		return nil
 	}
-	return &vango.AuthCheckConfig{
-		Interval:    c.cfg.RevalidationInterval,
-		Timeout:     c.cfg.RevalidationTimeout,
-		FailureMode: vango.FailOpenWithGrace,
-		MaxStale:    c.cfg.MaxStaleSession,
-		Check: func(ctx context.Context, p auth.Principal) error {
+		return &vango.AuthCheckConfig{
+			Interval:    c.cfg.RevalidationInterval,
+			Timeout:     c.cfg.RevalidationTimeout,
+			FailureMode: c.cfg.RevalidationFailureMode,
+			MaxStale:    c.cfg.MaxStaleSession,
+			Check: func(ctx context.Context, p auth.Principal) error {
 			// Active revocation detection (network call).
 			// Do NOT use refresh tokens here; AuthCheck runs off the session loop and must
 			// be safe under concurrency and long-lived sessions.
@@ -2452,10 +2527,45 @@ type WebhookEvent struct {
 	CreatedAt time.Time       `json:"created_at"`
 }
 
+// WebhookHandlerFunc is an error-capable webhook handler.
+// Returning a non-nil error causes the endpoint to return non-2xx so WorkOS can retry.
+type WebhookHandlerFunc func(context.Context, WebhookEvent) error
+
+type WebhookClaimStatus int
+
+const (
+	WebhookClaimAcquired WebhookClaimStatus = iota + 1
+	WebhookClaimDuplicate
+	WebhookClaimInFlight
+)
+
+// WebhookIdempotencyStore tracks delivery by WebhookEvent.ID.
+// Implementations MUST use the returned token as a lease token; only the
+// current claimant may successfully mark the event processed.
+type WebhookIdempotencyStore interface {
+	Claim(ctx context.Context, key string, leaseTTL time.Duration) (WebhookClaimStatus, string, error)
+	MarkProcessed(ctx context.Context, key, token string, ttl time.Duration) error
+	Release(ctx context.Context, key, token string) error
+}
+
+type WebhookHandlerOptions struct {
+	IdempotencyStore WebhookIdempotencyStore
+	InFlightTTL      time.Duration // default 5m
+	ProcessedTTL     time.Duration // default 24h
+}
+
+// NewMemoryWebhookIdempotencyStore provides a single-process helper suitable
+// for tests, local development, and single-instance deployments.
+func NewMemoryWebhookIdempotencyStore() WebhookIdempotencyStore
+
 // WebhookHandler provides a validated, typed webhook endpoint.
 //
 // It verifies the webhook signature using the configured secret,
 // parses the event, and dispatches to registered handlers.
+//
+// This compatibility entrypoint preserves legacy success-only handlers. For
+// mutating consumers, prefer WebhookHandlerWithOptions plus a
+// WebhookIdempotencyStore keyed by WebhookEvent.ID.
 //
 // Registration:
 //   mux.Handle("POST /webhooks/workos", workosClient.WebhookHandler(
@@ -2463,128 +2573,70 @@ type WebhookEvent struct {
 //       workos.OnDirectoryUserDeleted(handleUserDeprovisioned),
 //       workos.OnConnectionActivated(handleSSOActivated),
 //   ))
-	func (c *Client) WebhookHandler(handlers ...WebhookSubscription) http.Handler {
-		registry := buildWebhookRegistry(handlers)
+func (c *Client) WebhookHandler(handlers ...WebhookSubscription) http.Handler
 
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+// WebhookHandlerWithOptions adds retry-aware dispatch and optional idempotency.
+//
+// Dispatch contract:
+// - exact event handler runs first, then wildcard handler
+// - the first returned error (or panic) stops dispatch and returns 500
+// - subscriber panics are recovered inside the webhook package; process safety
+//   does not depend on a global HTTP panic-recovery middleware
+// - when IdempotencyStore is configured:
+//   - event.ID is REQUIRED
+//   - Duplicate => 200 without redispatch
+//   - InFlight => 503 so WorkOS retries later
+//   - success => MarkProcessed(event.ID, token, ProcessedTTL) before 200
+func (c *Client) WebhookHandlerWithOptions(opts WebhookHandlerOptions, handlers ...WebhookSubscription) http.Handler
 
-			// Read body (bounded)
-			limit := c.cfg.WebhookMaxBodyBytes
-			if limit <= 0 {
-				limit = 1 << 20
-			}
-			body, err := io.ReadAll(io.LimitReader(r.Body, limit))
-			if err != nil {
-				http.Error(w, "Failed to read body", http.StatusBadRequest)
-				return
-			}
-
-		// Verify signature.
-		//
-		// NOTE: net/http header lookup is case-insensitive. "WorkOS-Signature"
-		// is the canonical header name used in this spec.
-		sig := r.Header.Get("WorkOS-Signature")
-		if err := c.wh.VerifyWebhook(body, sig, c.cfg.WebhookSecret); err != nil {
-			http.Error(w, "Invalid signature", http.StatusUnauthorized)
-			return
-		}
-
-		// Parse event
-		var event WebhookEvent
-			if err := json.Unmarshal(body, &event); err != nil {
-				http.Error(w, "Invalid event payload", http.StatusBadRequest)
-				return
-			}
-
-			// Dispatch synchronously by default.
-			//
-			// Operational contract (MUST for handlers):
-			// - Handlers MUST be fast and SHOULD enqueue durable work rather than doing
-			//   slow I/O inline.
-			// - Webhook processing MUST be idempotent by event.ID.
-			//
-			// If you need “ack fast, process async”, your handler should enqueue and return.
-			if handler, ok := registry[event.Event]; ok && handler != nil {
-				handler(r.Context(), event)
-			}
-			if any := registry["*"]; any != nil {
-				any(r.Context(), event)
-			}
-
-			w.WriteHeader(http.StatusOK)
-		})
-	}
+// Operational contract (MUST for handlers):
+// - WorkOS webhook delivery is at-least-once.
+// - Mutating handlers MUST be idempotent by event.ID.
+// - Handlers MUST be fast and SHOULD enqueue durable work rather than doing slow I/O inline.
+// - Error-capable handlers SHOULD return an error only when the delivery must be retried.
+// - If a subscriber panics, the package MUST recover it, abort the delivery, and return 500.
+// - Distributed idempotency stores SHOULD implement:
+//   - Claim(key, leaseTTL): acquire only when key is absent or expired
+//   - MarkProcessed(key, token, ttl): atomically convert the matching in-flight lease into a processed marker
+//   - Release(key, token): delete only the matching in-flight lease
 
 // --- Webhook Subscription Builders ---
 
-	type WebhookSubscription struct {
-		Event   string
-		Handler func(context.Context, WebhookEvent)
-	}
+type WebhookSubscription struct {
+	Event      string
+	Handler    func(context.Context, WebhookEvent)
+	HandlerErr WebhookHandlerFunc
+}
 
-	func OnDirectoryUserCreated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "dsync.user.created", Handler: fn}
-	}
+// Legacy builders remain available:
+func OnDirectoryUserCreated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnDirectoryUserUpdated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnDirectoryUserDeleted(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnDirectoryGroupCreated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnDirectoryGroupUpdated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnDirectoryGroupDeleted(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnConnectionActivated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnConnectionDeactivated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnUserCreated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnUserUpdated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnUserDeleted(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnOrganizationMembershipCreated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnOrganizationMembershipDeleted(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnSessionCreated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
+func OnAnyEvent(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription
 
-	func OnDirectoryUserUpdated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "dsync.user.updated", Handler: fn}
-	}
+// Each builder also has an error-capable parallel variant with the `Err` suffix:
+func OnUserCreatedErr(fn WebhookHandlerFunc) WebhookSubscription
+func OnAnyEventErr(fn WebhookHandlerFunc) WebhookSubscription
+// ...and parallel `Err` variants for the other event-specific builders above.
 
-	func OnDirectoryUserDeleted(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "dsync.user.deleted", Handler: fn}
-	}
-
-	func OnDirectoryGroupCreated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "dsync.group.created", Handler: fn}
-	}
-
-	func OnDirectoryGroupUpdated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "dsync.group.updated", Handler: fn}
-	}
-
-	func OnDirectoryGroupDeleted(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "dsync.group.deleted", Handler: fn}
-	}
-
-	func OnConnectionActivated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "connection.activated", Handler: fn}
-	}
-
-	func OnConnectionDeactivated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "connection.deactivated", Handler: fn}
-	}
-
-	func OnUserCreated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "user.created", Handler: fn}
-	}
-
-	func OnUserUpdated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "user.updated", Handler: fn}
-	}
-
-	func OnUserDeleted(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "user.deleted", Handler: fn}
-	}
-
-	func OnOrganizationMembershipCreated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "organization_membership.created", Handler: fn}
-	}
-
-	func OnOrganizationMembershipDeleted(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "organization_membership.deleted", Handler: fn}
-	}
-
-	func OnSessionCreated(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "session.created", Handler: fn}
-	}
-
-	func OnAnyEvent(fn func(ctx context.Context, e WebhookEvent)) WebhookSubscription {
-		return WebhookSubscription{Event: "*", Handler: fn}
-	}
+// Recommended registration for mutating handlers:
+//   store := workos.NewMemoryWebhookIdempotencyStore() // single-process only
+//   mux.Handle("/webhooks/workos", workosClient.WebhookHandlerWithOptions(
+//       workos.WebhookHandlerOptions{IdempotencyStore: store},
+//       workos.OnUserCreatedErr(handleUserCreated),
+//       workos.OnAnyEventErr(handleAudit),
+//   ))
 ```
 
 ---

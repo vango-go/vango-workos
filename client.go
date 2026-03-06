@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vango-go/vango"
 	"github.com/workos/workos-go/v6/pkg/auditlogs"
 	"github.com/workos/workos-go/v6/pkg/directorysync"
 	"github.com/workos/workos-go/v6/pkg/organizations"
@@ -96,6 +97,12 @@ func New(cfg Config) (*Client, error) {
 	}
 	if cfg.SessionListCacheMaxUsers < 0 {
 		return nil, errors.New("workos: SessionListCacheMaxUsers cannot be negative")
+	}
+	switch cfg.RevalidationFailureMode {
+	case vango.FailOpenWithGrace, vango.FailClosed:
+		// ok
+	default:
+		return nil, errors.New("workos: RevalidationFailureMode is invalid")
 	}
 
 	if cfg.CookieName == "" {

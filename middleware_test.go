@@ -2,6 +2,7 @@ package workos
 
 import (
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -99,6 +100,7 @@ func TestMiddleware_ValidCookieAttachesIdentity(t *testing.T) {
 	setCookieOnRequest(t, req, client.cfg, &cookieSession{
 		AccessToken:  token,
 		RefreshToken: "refresh_1",
+		OrgID:        claims.OrgID,
 		IdentityHint: &Identity{
 			UserID:    "user_hint",
 			Email:     "hint@example.com",
@@ -139,6 +141,46 @@ func TestMiddleware_ValidCookieAttachesIdentity(t *testing.T) {
 	}
 	if got := len(w.Result().Header.Values("Set-Cookie")); got != 0 {
 		t.Fatalf("unexpected cookie rewrite: %v", w.Result().Header.Values("Set-Cookie"))
+	}
+}
+
+func TestMiddleware_OrgIDFromClaims_UpgradesCookie(t *testing.T) {
+	key := mustRSAKey(t)
+	claims := baseClaims()
+	claims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(10 * time.Minute))
+	token := signRS256Token(t, key, "kid-1", claims)
+
+	client, ts := newMiddlewareClientWithJWKS(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(jwkDoc{Keys: []jwkKey{rsaJWK(t, &key.PublicKey, "kid-1")}})
+	})
+	defer ts.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/private", nil)
+	setCookieOnRequest(t, req, client.cfg, &cookieSession{
+		AccessToken:  token,
+		RefreshToken: "refresh_1",
+		// OrgID intentionally missing; middleware should upgrade from claims.
+	})
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := client.Middleware()(next)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	updated := mustFindCookie(t, w.Result().Cookies(), client.cfg.CookieName)
+	verifyReq := httptest.NewRequest(http.MethodGet, "http://example.test/verify", nil)
+	verifyReq.AddCookie(updated)
+	updatedSess, err := readSessionCookie(verifyReq, client.cfg)
+	if err != nil {
+		t.Fatalf("readSessionCookie(updated) error = %v", err)
+	}
+	if updatedSess == nil {
+		t.Fatal("expected updated cookie session")
+	}
+	if updatedSess.OrgID != claims.OrgID {
+		t.Fatalf("cookie OrgID = %q, want %q", updatedSess.OrgID, claims.OrgID)
 	}
 }
 
@@ -318,6 +360,128 @@ func TestMiddleware_ExpiredBeyondLeewayRefreshEnabledSuccess(t *testing.T) {
 	}
 }
 
+func TestMiddleware_ExpiredOutsideLeeway_RefreshVerifyJWKSUnavailableFailsOpen(t *testing.T) {
+	keyOld := mustRSAKey(t)
+	keyNew := mustRSAKey(t)
+
+	expiredClaims := baseClaims()
+	expiredClaims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(-2 * time.Minute))
+	expiredToken := signRS256Token(t, keyOld, "kid-old", expiredClaims)
+
+	refreshedClaims := baseClaims()
+	refreshedClaims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(10 * time.Minute))
+	refreshedToken := signRS256Token(t, keyNew, "kid-new", refreshedClaims)
+
+	client, err := New(validConfig())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	client.cfg.JWKSURL = "http://127.0.0.1:1/unreachable"
+	client.cfg.JWKSFetchTimeout = 10 * time.Millisecond
+	client.cfg.JWTAudience = "client_test_audience"
+	client.jwksHTTPClient.Timeout = client.cfg.JWKSFetchTimeout
+	client.jwksCache = &jwksCache{
+		fetchedAt: time.Now(),
+		keys: map[string]*rsa.PublicKey{
+			"kid-old": &keyOld.PublicKey,
+		},
+	}
+	client.um = &fakeUMClient{
+		authenticateWithRefreshTokenFunc: func(context.Context, usermanagement.AuthenticateWithRefreshTokenOpts) (usermanagement.RefreshAuthenticationResponse, error) {
+			return usermanagement.RefreshAuthenticationResponse{
+				AccessToken:  refreshedToken,
+				RefreshToken: "refresh_rotated",
+			}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/private", nil)
+	setCookieOnRequest(t, req, client.cfg, &cookieSession{
+		AccessToken:  expiredToken,
+		RefreshToken: "refresh_old",
+	})
+
+	var gotUser any
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = vango.UserFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+	h := client.Middleware()(next)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if gotUser != nil {
+		t.Fatalf("user = %#v, want nil", gotUser)
+	}
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
+	}
+	if len(w.Result().Header.Values("Set-Cookie")) != 0 {
+		t.Fatalf("unexpected cookie mutation headers: %v", w.Result().Header.Values("Set-Cookie"))
+	}
+}
+
+func TestMiddleware_ExpiredWithinLeeway_RefreshVerifyJWKSUnavailableFailsOpen(t *testing.T) {
+	keyOld := mustRSAKey(t)
+	keyNew := mustRSAKey(t)
+
+	leewayExpiredClaims := baseClaims()
+	leewayExpiredClaims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(-5 * time.Second))
+	leewayExpiredToken := signRS256Token(t, keyOld, "kid-old", leewayExpiredClaims)
+
+	refreshedClaims := baseClaims()
+	refreshedClaims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(10 * time.Minute))
+	refreshedToken := signRS256Token(t, keyNew, "kid-new", refreshedClaims)
+
+	client, err := New(validConfig())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	client.cfg.JWKSURL = "http://127.0.0.1:1/unreachable"
+	client.cfg.JWKSFetchTimeout = 10 * time.Millisecond
+	client.cfg.JWTAudience = "client_test_audience"
+	client.jwksHTTPClient.Timeout = client.cfg.JWKSFetchTimeout
+	client.jwksCache = &jwksCache{
+		fetchedAt: time.Now(),
+		keys: map[string]*rsa.PublicKey{
+			"kid-old": &keyOld.PublicKey,
+		},
+	}
+	client.um = &fakeUMClient{
+		authenticateWithRefreshTokenFunc: func(context.Context, usermanagement.AuthenticateWithRefreshTokenOpts) (usermanagement.RefreshAuthenticationResponse, error) {
+			return usermanagement.RefreshAuthenticationResponse{
+				AccessToken:  refreshedToken,
+				RefreshToken: "refresh_rotated",
+			}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/private", nil)
+	setCookieOnRequest(t, req, client.cfg, &cookieSession{
+		AccessToken:  leewayExpiredToken,
+		RefreshToken: "refresh_old",
+	})
+
+	var gotUser any
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = vango.UserFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+	h := client.Middleware()(next)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if gotUser != nil {
+		t.Fatalf("user = %#v, want nil", gotUser)
+	}
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
+	}
+	if len(w.Result().Header.Values("Set-Cookie")) != 0 {
+		t.Fatalf("unexpected cookie mutation headers: %v", w.Result().Header.Values("Set-Cookie"))
+	}
+}
+
 func TestMiddleware_InvalidIssuerDoesNotRefreshClears(t *testing.T) {
 	key := mustRSAKey(t)
 	claims := baseClaims()
@@ -447,6 +611,54 @@ func TestMiddleware_JWKSUnavailableDoesNotRefreshOrClearCookie(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&refreshCalls); got != 0 {
 		t.Fatalf("refresh calls = %d, want 0", got)
+	}
+	if len(w.Result().Header.Values("Set-Cookie")) != 0 {
+		t.Fatalf("unexpected cookie mutation headers: %v", w.Result().Header.Values("Set-Cookie"))
+	}
+}
+
+func TestMiddleware_UnknownKidJWKSUnavailableFailsOpenWithoutCookieClear(t *testing.T) {
+	keyA := mustRSAKey(t)
+	keyB := mustRSAKey(t)
+	claims := baseClaims()
+	claims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(5 * time.Minute))
+	token := signRS256Token(t, keyB, "kid-b", claims)
+
+	client, err := New(validConfig())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	client.cfg.JWKSURL = "http://127.0.0.1:1/unreachable"
+	client.cfg.JWKSFetchTimeout = 10 * time.Millisecond
+	client.cfg.JWTAudience = "client_test_audience"
+	client.jwksHTTPClient.Timeout = client.cfg.JWKSFetchTimeout
+	client.jwksCache = &jwksCache{
+		fetchedAt: time.Now(),
+		keys: map[string]*rsa.PublicKey{
+			"kid-a": &keyA.PublicKey,
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/private", nil)
+	setCookieOnRequest(t, req, client.cfg, &cookieSession{
+		AccessToken:  token,
+		RefreshToken: "refresh_present",
+	})
+
+	var gotUser any
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = vango.UserFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+	h := client.Middleware()(next)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if gotUser != nil {
+		t.Fatalf("user = %#v, want nil", gotUser)
+	}
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
 	}
 	if len(w.Result().Header.Values("Set-Cookie")) != 0 {
 		t.Fatalf("unexpected cookie mutation headers: %v", w.Result().Header.Values("Set-Cookie"))
@@ -636,6 +848,7 @@ func TestMiddleware_IdentityHintFallback(t *testing.T) {
 	setCookieOnRequest(t, req, client.cfg, &cookieSession{
 		AccessToken:  token,
 		RefreshToken: "refresh_1",
+		OrgID:        "org_cookie",
 		IdentityHint: &Identity{
 			Email: "hint@example.com",
 			Name:  "Hint User",
@@ -662,12 +875,15 @@ func TestMiddleware_IdentityHintFallback(t *testing.T) {
 	if gotIdentity.Name != "Hint User" {
 		t.Fatalf("Name = %q, want %q", gotIdentity.Name, "Hint User")
 	}
-	if gotIdentity.OrgID != "org_hint" {
-		t.Fatalf("OrgID = %q, want %q", gotIdentity.OrgID, "org_hint")
+	if gotIdentity.OrgID != "org_cookie" {
+		t.Fatalf("OrgID = %q, want %q", gotIdentity.OrgID, "org_cookie")
 	}
 	// Roles should still come from claims, not hint.
 	if len(gotIdentity.Roles) == 0 || gotIdentity.Roles[0] != claims.Role {
 		t.Fatalf("Roles = %#v", gotIdentity.Roles)
+	}
+	if got := len(w.Result().Header.Values("Set-Cookie")); got != 0 {
+		t.Fatalf("unexpected cookie rewrite: %v", w.Result().Header.Values("Set-Cookie"))
 	}
 }
 
@@ -692,6 +908,115 @@ func TestMiddleware_NotRouteProtection(t *testing.T) {
 	}
 	if body := w.Body.String(); !strings.Contains(body, "handled by downstream") {
 		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestMiddleware_OrgIDMissing_FetchesFromValidateSession_UpgradesCookie(t *testing.T) {
+	key := mustRSAKey(t)
+	claims := baseClaims()
+	claims.OrgID = ""
+	claims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(10 * time.Minute))
+	token := signRS256Token(t, key, "kid-1", claims)
+
+	client, ts := newMiddlewareClientWithJWKS(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(jwkDoc{Keys: []jwkKey{rsaJWK(t, &key.PublicKey, "kid-1")}})
+	})
+	defer ts.Close()
+
+	client.um = &fakeUMClient{
+		listSessionsFunc: func(_ context.Context, userID string, _ usermanagement.ListSessionsOpts) (usermanagement.ListSessionsResponse, error) {
+			if userID != claims.Subject {
+				t.Fatalf("ListSessions userID = %q, want %q", userID, claims.Subject)
+			}
+			return usermanagement.ListSessionsResponse{
+				Data: []usermanagement.Session{{
+					ID:             claims.SID,
+					UserID:         claims.Subject,
+					OrganizationID: "org_from_session",
+					Status:         "active",
+					ExpiresAt:      time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano),
+				}},
+			}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/private", nil)
+	setCookieOnRequest(t, req, client.cfg, &cookieSession{
+		AccessToken:  token,
+		RefreshToken: "refresh_1",
+	})
+
+	var gotIdentity *Identity
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u := vango.UserFromContext(r.Context())
+		gotIdentity, _ = u.(*Identity)
+		w.WriteHeader(http.StatusOK)
+	})
+	h := client.Middleware()(next)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if gotIdentity == nil {
+		t.Fatal("expected identity in context")
+	}
+	if gotIdentity.OrgID != "org_from_session" {
+		t.Fatalf("OrgID = %q, want %q", gotIdentity.OrgID, "org_from_session")
+	}
+
+	setCookies := w.Result().Cookies()
+	updated := mustFindCookie(t, setCookies, client.cfg.CookieName)
+	verifyReq := httptest.NewRequest(http.MethodGet, "http://example.test/verify", nil)
+	verifyReq.AddCookie(updated)
+	updatedSess, err := readSessionCookie(verifyReq, client.cfg)
+	if err != nil {
+		t.Fatalf("readSessionCookie(updated) error = %v", err)
+	}
+	if updatedSess == nil {
+		t.Fatal("expected updated cookie session")
+	}
+	if updatedSess.OrgID != "org_from_session" {
+		t.Fatalf("cookie OrgID = %q, want %q", updatedSess.OrgID, "org_from_session")
+	}
+}
+
+func TestMiddleware_OrgIDMissing_ValidateSessionInactive_ClearsCookie(t *testing.T) {
+	key := mustRSAKey(t)
+	claims := baseClaims()
+	claims.OrgID = ""
+	claims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(10 * time.Minute))
+	token := signRS256Token(t, key, "kid-1", claims)
+
+	client, ts := newMiddlewareClientWithJWKS(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(jwkDoc{Keys: []jwkKey{rsaJWK(t, &key.PublicKey, "kid-1")}})
+	})
+	defer ts.Close()
+
+	client.um = &fakeUMClient{
+		listSessionsFunc: func(_ context.Context, _ string, _ usermanagement.ListSessionsOpts) (usermanagement.ListSessionsResponse, error) {
+			return usermanagement.ListSessionsResponse{Data: nil}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/private", nil)
+	setCookieOnRequest(t, req, client.cfg, &cookieSession{
+		AccessToken:  token,
+		RefreshToken: "refresh_1",
+	})
+
+	var gotUser any
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = vango.UserFromContext(r.Context())
+		w.WriteHeader(http.StatusAccepted)
+	})
+	h := client.Middleware()(next)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if gotUser != nil {
+		t.Fatalf("user = %#v, want nil", gotUser)
+	}
+	if len(w.Result().Header.Values("Set-Cookie")) == 0 {
+		t.Fatal("expected clear cookie header")
 	}
 }
 

@@ -160,6 +160,96 @@ func TestOnSessionResume_ActiveRehydrates(t *testing.T) {
 	}
 }
 
+func TestOnSessionResume_ActiveRehydrates_SetsOrgWhenMissing(t *testing.T) {
+	client, err := New(validConfig())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	client.um = &fakeUMClient{
+		listSessionsFunc: func(_ context.Context, _ string, _ usermanagement.ListSessionsOpts) (usermanagement.ListSessionsResponse, error) {
+			return usermanagement.ListSessionsResponse{
+				Data: []usermanagement.Session{{
+					ID:             "sess_active",
+					UserID:         "user_resume",
+					OrganizationID: "org_resume",
+					Status:         "active",
+					ExpiresAt:      time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano),
+				}},
+			}, nil
+		},
+	}
+	bridge := client.SessionBridge()
+	sess := &vango.Session{}
+
+	identity := &Identity{
+		UserID:    "user_resume",
+		Email:     "resume@example.com",
+		Name:      "Resume User",
+		OrgID:     "",
+		Roles:     []string{"member"},
+		SessionID: "sess_active",
+	}
+	httpCtx := vango.WithUser(context.Background(), identity)
+
+	if err := bridge.OnSessionResume(httpCtx, sess); err != nil {
+		t.Fatalf("OnSessionResume() error = %v", err)
+	}
+
+	stored, ok := sess.Get(auth.SessionKey).(*Identity)
+	if !ok || stored == nil {
+		t.Fatal("expected identity in session after resume")
+	}
+	if stored.OrgID != "org_resume" {
+		t.Fatalf("OrgID = %q, want %q", stored.OrgID, "org_resume")
+	}
+
+	p, ok := sess.Get(auth.SessionKeyPrincipal).(auth.Principal)
+	if !ok {
+		t.Fatal("expected principal after resume")
+	}
+	if p.TenantID != "org_resume" {
+		t.Fatalf("Principal.TenantID = %q, want %q", p.TenantID, "org_resume")
+	}
+}
+
+func TestOnSessionResume_OrgMismatchRejects(t *testing.T) {
+	client, err := New(validConfig())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	client.um = &fakeUMClient{
+		listSessionsFunc: func(_ context.Context, _ string, _ usermanagement.ListSessionsOpts) (usermanagement.ListSessionsResponse, error) {
+			return usermanagement.ListSessionsResponse{
+				Data: []usermanagement.Session{{
+					ID:             "sess_active",
+					UserID:         "user_resume",
+					OrganizationID: "org_b",
+					Status:         "active",
+					ExpiresAt:      time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano),
+				}},
+			}, nil
+		},
+	}
+	bridge := client.SessionBridge()
+	sess := &vango.Session{}
+
+	identity := &Identity{
+		UserID:    "user_resume",
+		Email:     "resume@example.com",
+		OrgID:     "org_a",
+		SessionID: "sess_active",
+	}
+	httpCtx := vango.WithUser(context.Background(), identity)
+
+	err = bridge.OnSessionResume(httpCtx, sess)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if err.Error() != "workos: session org mismatch" {
+		t.Fatalf("error = %q", err.Error())
+	}
+}
+
 func TestOnSessionResume_ValidateErrorWrapped(t *testing.T) {
 	client, err := New(validConfig())
 	if err != nil {
@@ -243,6 +333,17 @@ func TestRevalidationConfig_CheckAndOnExpired(t *testing.T) {
 		err := cfg.Check(context.Background(), auth.Principal{ID: "user_1", SessionID: "sess_1"})
 		if err == nil || err.Error() != "workos: session inactive" {
 			t.Fatalf("Check error = %v", err)
+		}
+	})
+
+	t.Run("failure mode is configurable", func(t *testing.T) {
+		client.cfg.RevalidationFailureMode = vango.FailClosed
+		cfg := client.RevalidationConfig()
+		if cfg == nil {
+			t.Fatal("expected revalidation config")
+		}
+		if cfg.FailureMode != vango.FailClosed {
+			t.Fatalf("FailureMode = %v, want %v", cfg.FailureMode, vango.FailClosed)
 		}
 	})
 
