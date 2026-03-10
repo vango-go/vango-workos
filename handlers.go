@@ -2,15 +2,27 @@ package workos
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"html"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/workos/workos-go/v6/pkg/usermanagement"
 )
+
+func authFailedMessage(reason string) string {
+	msg := "Authentication failed"
+	if strings.TrimSpace(os.Getenv("VANGO_DEV")) == "1" && strings.TrimSpace(reason) != "" {
+		msg += ": " + reason
+	}
+	return msg
+}
 
 func setAuthNoStoreHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -23,6 +35,27 @@ func generateState() string {
 		return ""
 	}
 	return hex.EncodeToString(b)
+}
+
+type unverifiedAccessTokenClaims struct {
+	Issuer   string          `json:"iss"`
+	Audience json.RawMessage `json:"aud"`
+}
+
+func accessTokenDebugClaims(token string) (string, string) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) < 2 {
+		return "", ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", ""
+	}
+	var claims unverifiedAccessTokenClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", ""
+	}
+	return claims.Issuer, strings.TrimSpace(string(claims.Audience))
 }
 
 func (c *Client) SignInHandler(w http.ResponseWriter, r *http.Request) {
@@ -115,17 +148,29 @@ func (c *Client) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		Code:     code,
 	})
 	if err != nil {
-		http.Error(w, "Authentication failed", http.StatusUnauthorized)
+		slog.Warn("workos callback code exchange failed", "error", err)
+		http.Error(w, authFailedMessage("code exchange failed"), http.StatusUnauthorized)
 		return
 	}
 	// Refresh token is required because middleware uses it to rotate expired access tokens.
 	if strings.TrimSpace(authResp.RefreshToken) == "" {
-		http.Error(w, "Authentication failed", http.StatusUnauthorized)
+		slog.Warn("workos callback missing refresh token")
+		http.Error(w, authFailedMessage("missing refresh token"), http.StatusUnauthorized)
 		return
 	}
 	claims, err := c.VerifyAccessToken(r.Context(), authResp.AccessToken)
 	if err != nil {
-		http.Error(w, "Authentication failed", http.StatusUnauthorized)
+		if strings.TrimSpace(os.Getenv("VANGO_DEV")) == "1" {
+			rawIssuer, rawAudience := accessTokenDebugClaims(authResp.AccessToken)
+			slog.Warn("workos callback token debug",
+				"configured_issuer", c.cfg.JWTIssuer,
+				"configured_audience", c.cfg.JWTAudience,
+				"token_issuer", rawIssuer,
+				"token_audience", rawAudience,
+			)
+		}
+		slog.Warn("workos callback access token verification failed", "error", err)
+		http.Error(w, authFailedMessage("access token verification failed ("+err.Error()+")"), http.StatusUnauthorized)
 		return
 	}
 

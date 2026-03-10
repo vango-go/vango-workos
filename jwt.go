@@ -3,6 +3,7 @@ package workos
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -52,6 +53,21 @@ func audienceContains(aud jwt.ClaimStrings, want string) bool {
 		}
 	}
 	return false
+}
+
+func validIssuer(got, configured, clientID string) bool {
+	got = normalizeIssuer(got)
+	configured = normalizeIssuer(configured)
+	if got == "" || configured == "" {
+		return false
+	}
+	if got == configured {
+		return true
+	}
+	if clientID == "" {
+		return false
+	}
+	return got == configured+fmt.Sprintf("/user_management/%s", strings.TrimSpace(clientID))
 }
 
 // VerifyAccessToken validates a WorkOS access token locally using JWKS.
@@ -116,10 +132,11 @@ func (c *Client) VerifyAccessToken(ctx context.Context, accessToken string) (*Ac
 		return nil, invalidTokenError("workos: invalid access token")
 	}
 
-	if normalizeIssuer(claims.Issuer) != normalizeIssuer(c.cfg.JWTIssuer) {
+	if !validIssuer(claims.Issuer, c.cfg.JWTIssuer, c.cfg.ClientID) {
 		return nil, invalidTokenError("workos: invalid token issuer")
 	}
-	if !audienceContains(claims.Audience, c.cfg.JWTAudience) {
+	// WorkOS access tokens may omit aud entirely. When it is present, enforce it.
+	if len(claims.Audience) > 0 && !audienceContains(claims.Audience, c.cfg.JWTAudience) {
 		return nil, invalidTokenError("workos: invalid token audience")
 	}
 	if claims.Subject == "" || claims.SID == "" {

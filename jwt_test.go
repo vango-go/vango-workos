@@ -113,6 +113,30 @@ func TestVerifyAccessToken_Success(t *testing.T) {
 	}
 }
 
+func TestVerifyAccessToken_SuccessWithClientScopedIssuerAndNoAudience(t *testing.T) {
+	key := mustRSAKey(t)
+	claims := baseClaims()
+	claims.Issuer = "https://api.workos.com/user_management/client_test_123456"
+	claims.Audience = nil
+	token := signRS256Token(t, key, "kid-1", claims)
+
+	client, ts := newJWTTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(jwkDoc{Keys: []jwkKey{rsaJWK(t, &key.PublicKey, "kid-1")}})
+	})
+	defer ts.Close()
+
+	got, err := client.VerifyAccessToken(context.Background(), token)
+	if err != nil {
+		t.Fatalf("VerifyAccessToken() error = %v", err)
+	}
+	if got.Issuer != claims.Issuer {
+		t.Fatalf("Issuer = %q, want %q", got.Issuer, claims.Issuer)
+	}
+	if got.Audience != "" {
+		t.Fatalf("Audience = %q, want empty", got.Audience)
+	}
+}
+
 func TestVerifyAccessToken_EmptyToken(t *testing.T) {
 	client, ts := newJWTTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
